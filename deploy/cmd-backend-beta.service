@@ -1,0 +1,19 @@
+[Unit]
+Description=CMD backend_beta (Django + Channels, daphne :8891)
+After=network.target loggerfast-backend.service
+
+[Service]
+Type=simple
+WorkingDirectory=/home/rohith/CMD/backend_beta
+Environment=DJANGO_SETTINGS_MODULE=config.settings
+EnvironmentFile=-/home/rohith/CMD/backend_beta/.env
+ExecStart=/home/rohith/.pyenv/versions/3.11.9/bin/daphne -b 0.0.0.0 -p 8891 config.asgi:application
+Restart=always
+RestartSec=3
+# journal, not a file — backend2's daphne.log grew to 1.8 GB.
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=cmd-backend-beta
+
+[Install]
+WantedBy=default.target

@@ -1,0 +1,7 @@
+[
+  { "fromDeviceId": "dev_1788998400001", "toDeviceId": "dev_1788998400002", "edgeType": "feeds" },
+  { "fromDeviceId": "dev_1788998400001", "toDeviceId": "dev_1788998400003", "edgeType": "feeds" },
+  { "fromDeviceId": "dev_1788998400003", "toDeviceId": "dev_1788998400004", "edgeType": "feeds" },
+  { "fromDeviceId": "dev_1788998400005", "toDeviceId": "dev_1788998400006", "edgeType": "feeds" },
+  { "fromDeviceId": "dev_1788998400005", "toDeviceId": "dev_1788998400001", "edgeType": "tie" }
+]

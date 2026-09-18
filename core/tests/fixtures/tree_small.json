@@ -1,0 +1,126 @@
+[
+  {
+    "id": "grp_1788998400000",
+    "name": "Plant",
+    "parentGroupId": null,
+    "sortOrder": 0,
+    "isPanel": false,
+    "devices": [],
+    "children": [
+      {
+        "id": "grp_1788998400001",
+        "name": "Yard",
+        "parentGroupId": "grp_1788998400000",
+        "sortOrder": 0,
+        "isPanel": false,
+        "devices": [
+          {
+            "id": "dev_1788998400009",
+            "name": "MFM-09",
+            "protocol": "modbus",
+            "status": "connected",
+            "gatewayId": "gw_1",
+            "role": null
+          }
+        ],
+        "children": []
+      },
+      {
+        "id": "grp_1788998400002",
+        "name": "Block A",
+        "parentGroupId": "grp_1788998400000",
+        "sortOrder": 1,
+        "isPanel": false,
+        "devices": [],
+        "children": [
+          {
+            "id": "grp_1788998400003",
+            "name": "MCC-1",
+            "parentGroupId": "grp_1788998400002",
+            "sortOrder": 0,
+            "isPanel": true,
+            "devices": [
+              {
+                "id": "dev_1788998400001",
+                "name": "MFM-01",
+                "protocol": "modbus",
+                "status": "connected",
+                "gatewayId": "gw_1",
+                "role": "incomer"
+              },
+              {
+                "id": "dev_1788998400002",
+                "name": "MFM-02",
+                "protocol": "modbus",
+                "status": "connected",
+                "gatewayId": "gw_1",
+                "role": "outgoer"
+              },
+              {
+                "id": "dev_1788998400003",
+                "name": "MFM-03",
+                "protocol": "modbus",
+                "status": "degraded",
+                "gatewayId": "gw_1",
+                "role": "outgoer"
+              }
+            ],
+            "children": []
+          },
+          {
+            "id": "grp_1788998400004",
+            "name": "MCC-2",
+            "parentGroupId": "grp_1788998400002",
+            "sortOrder": 1,
+            "isPanel": true,
+            "devices": [
+              {
+                "id": "dev_1788998400005",
+                "name": "MFM-05",
+                "protocol": "modbus",
+                "status": "connected",
+                "gatewayId": "gw_2",
+                "role": "incomer"
+              },
+              {
+                "id": "dev_1788998400006",
+                "name": "MFM-06",
+                "protocol": "modbus",
+                "status": "connected",
+                "gatewayId": "gw_2",
+                "role": "outgoer"
+              }
+            ],
+            "children": []
+          },
+          {
+            "id": "grp_1788998400005",
+            "name": "Lighting DB",
+            "parentGroupId": "grp_1788998400002",
+            "sortOrder": 2,
+            "isPanel": true,
+            "devices": [
+              {
+                "id": "dev_1788998400003",
+                "name": "MFM-03",
+                "protocol": "modbus",
+                "status": "degraded",
+                "gatewayId": "gw_1",
+                "role": "incomer"
+              },
+              {
+                "id": "dev_1788998400004",
+                "name": "MFM-04",
+                "protocol": "modbus",
+                "status": "connected",
+                "gatewayId": "gw_1",
+                "role": "outgoer"
+              }
+            ],
+            "children": []
+          }
+        ]
+      }
+    ]
+  }
+]

@@ -1,0 +1,98 @@
+[
+  {
+    "id": "dev_1788998400001",
+    "name": "MFM-01",
+    "protocol": "modbus",
+    "gatewayId": "gw_1",
+    "port": 502,
+    "unitId": 1,
+    "status": "connected",
+    "latencyMs": 45,
+    "lastError": null,
+    "autoReconnect": true
+  },
+  {
+    "id": "dev_1788998400002",
+    "name": "MFM-02",
+    "protocol": "modbus",
+    "gatewayId": "gw_1",
+    "port": 502,
+    "unitId": 2,
+    "status": "connected",
+    "latencyMs": 51,
+    "lastError": null,
+    "autoReconnect": true
+  },
+  {
+    "id": "dev_1788998400003",
+    "name": "MFM-03",
+    "protocol": "modbus",
+    "gatewayId": "gw_1",
+    "port": 502,
+    "unitId": 3,
+    "status": "degraded",
+    "latencyMs": 480,
+    "lastError": "timeout",
+    "autoReconnect": true
+  },
+  {
+    "id": "dev_1788998400004",
+    "name": "MFM-04",
+    "protocol": "modbus",
+    "gatewayId": "gw_1",
+    "port": 502,
+    "unitId": 4,
+    "status": "connected",
+    "latencyMs": 38,
+    "lastError": null,
+    "autoReconnect": true
+  },
+  {
+    "id": "dev_1788998400005",
+    "name": "MFM-05",
+    "protocol": "modbus",
+    "gatewayId": "gw_2",
+    "port": 502,
+    "unitId": 5,
+    "status": "connected",
+    "latencyMs": 44,
+    "lastError": null,
+    "autoReconnect": true
+  },
+  {
+    "id": "dev_1788998400006",
+    "name": "MFM-06",
+    "protocol": "modbus",
+    "gatewayId": "gw_2",
+    "port": 502,
+    "unitId": 6,
+    "status": "connected",
+    "latencyMs": 47,
+    "lastError": null,
+    "autoReconnect": true
+  },
+  {
+    "id": "dev_1788998400008",
+    "name": "MFM-08",
+    "protocol": "opcua",
+    "gatewayId": "gw_2",
+    "port": 4840,
+    "unitId": null,
+    "status": "disconnected",
+    "latencyMs": null,
+    "lastError": "no route to host",
+    "autoReconnect": true
+  },
+  {
+    "id": "dev_1788998400009",
+    "name": "MFM-09",
+    "protocol": "modbus",
+    "gatewayId": "gw_1",
+    "port": 502,
+    "unitId": 9,
+    "status": "connected",
+    "latencyMs": 62,
+    "lastError": null,
+    "autoReconnect": true
+  }
+]

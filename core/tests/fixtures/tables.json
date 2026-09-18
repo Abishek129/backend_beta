@@ -1,0 +1,102 @@
+[
+  {
+    "id": "tbl_1788998400101",
+    "name": "mfm_01",
+    "schemaId": "sch_1788998400001",
+    "dbTargetId": "dbt_default",
+    "deviceId": "dev_1788998400001",
+    "status": "migrated",
+    "lastMigratedAt": "2026-09-08T10:30:00Z",
+    "dbTarget": { "id": "dbt_default" }
+  },
+  {
+    "id": "tbl_1788998400102",
+    "name": "mfm_02",
+    "schemaId": "sch_1788998400001",
+    "dbTargetId": "dbt_default",
+    "deviceId": "dev_1788998400002",
+    "status": "migrated",
+    "lastMigratedAt": "2026-09-08T10:30:00Z",
+    "dbTarget": { "id": "dbt_default" }
+  },
+  {
+    "id": "tbl_1788998400103",
+    "name": "mfm_02",
+    "schemaId": "sch_1788998400002",
+    "dbTargetId": "dbt_default",
+    "deviceId": "dev_1788998400002",
+    "status": "migrated",
+    "lastMigratedAt": "2026-09-08T10:31:00Z",
+    "dbTarget": { "id": "dbt_default" }
+  },
+  {
+    "id": "tbl_1788998400104",
+    "name": "mfm_03",
+    "schemaId": "sch_1788998400001",
+    "dbTargetId": "dbt_default",
+    "deviceId": "dev_1788998400003",
+    "status": "migrated",
+    "lastMigratedAt": "2026-09-08T10:30:00Z",
+    "dbTarget": { "id": "dbt_default" }
+  },
+  {
+    "id": "tbl_1788998400105",
+    "name": "mfm_04",
+    "schemaId": "sch_1788998400001",
+    "dbTargetId": "dbt_default",
+    "deviceId": "dev_1788998400004",
+    "status": "migrated",
+    "lastMigratedAt": "2026-09-08T10:30:00Z",
+    "dbTarget": { "id": "dbt_default" }
+  },
+  {
+    "id": "tbl_1788998400106",
+    "name": "mfm_05_a",
+    "schemaId": "sch_1788998400001",
+    "dbTargetId": "dbt_default",
+    "deviceId": "dev_1788998400005",
+    "status": "migrated",
+    "lastMigratedAt": "2026-09-08T10:30:00Z",
+    "dbTarget": { "id": "dbt_default" }
+  },
+  {
+    "id": "tbl_1788998400107",
+    "name": "mfm_05_b",
+    "schemaId": "sch_1788998400001",
+    "dbTargetId": "dbt_default",
+    "deviceId": "dev_1788998400005",
+    "status": "migrated",
+    "lastMigratedAt": "2026-09-08T10:32:00Z",
+    "dbTarget": { "id": "dbt_default" }
+  },
+  {
+    "id": "tbl_1788998400108",
+    "name": "mfm_06",
+    "schemaId": "sch_1788998400001",
+    "dbTargetId": "dbt_default",
+    "deviceId": "dev_1788998400006",
+    "status": "migrated",
+    "lastMigratedAt": "2026-09-08T10:30:00Z",
+    "dbTarget": { "id": "dbt_default" }
+  },
+  {
+    "id": "tbl_1788998400109",
+    "name": "mfm_09",
+    "schemaId": "sch_1788998400001",
+    "dbTargetId": "dbt_default",
+    "deviceId": "dev_1788998400009",
+    "status": "migrated",
+    "lastMigratedAt": "2026-09-08T10:30:00Z",
+    "dbTarget": { "id": "dbt_default" }
+  },
+  {
+    "id": "tbl_1788998400110",
+    "name": "mfm_08_draft",
+    "schemaId": "sch_1788998400001",
+    "dbTargetId": "dbt_default",
+    "deviceId": "dev_1788998400008",
+    "status": "not_migrated",
+    "lastMigratedAt": null,
+    "dbTarget": { "id": "dbt_default" }
+  }
+]
