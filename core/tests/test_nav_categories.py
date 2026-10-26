@@ -21,8 +21,8 @@ def category_of(slug, name=''):
 class TableIntegrityTests(SimpleTestCase):
     def test_the_eight_categories_are_fixed_and_ordered(self):
         self.assertEqual([cid for cid, _l, _s in NAV_CATEGORIES],
-                         ['ht', 'amf', 'pcc', 'apfc', 'ups', 'utility',
-                          'production', 'hvac'])
+                         ['ht', 'amf', 'pcc', 'ups', 'apfc', 'production',
+                          'utility', 'hvac'])
 
     def test_every_token_maps_to_a_declared_destination(self):
         self.assertLessEqual(set(PANEL_KIND_TOKENS.values()), set(PANEL_KIND_CATEGORY))

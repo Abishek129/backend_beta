@@ -1,9 +1,4 @@
-"""panels.dispatch — id -> equipment type, and the 4404 reject path.
-
-With zero screens registered (consumers pending discussion) EVERY ws/mfm/ path
-falls to the catch-all, so both a garbage id and a valid one must answer with an
-``error`` frame (code 4404) and close 4404 rather than 500 / "No route found".
-"""
+"""panels.dispatch — id/type routing and the 4404 reject path."""
 from asgiref.sync import async_to_sync
 from channels.testing import WebsocketCommunicator
 from django.test import TestCase, TransactionTestCase
@@ -62,10 +57,23 @@ class ResolveTypeTests(TransactionTestCase):
         self.assertIsNone(resolve(FEEDER_ID_OFFSET + 999_999))  # no such meter
 
 
-class NoScreensRegisteredTests(TestCase):
-    def test_registry_is_empty(self):
-        # PIN 2026-09-09: consumers pending discussion — routing = catch-all only.
-        self.assertEqual(SCREENS, {})
+class ScreensRegisteredTests(TestCase):
+    def test_single_and_distribution_panel_screen_matrix(self):
+        expected = {
+            'overview', 'real-time-monitoring', 'energy-power', 'energy-summary',
+            'power-energy-analysis', 'load-anomalies', 'voltage-current',
+            'voltage-history', 'current-history', 'power-quality-summary',
+            'power-quality-history', 'energy-distribution',
+        }
+        self.assertEqual(set(SCREENS), expected)
+        shared = {'real-time-monitoring', 'energy-power', 'voltage-current',
+                  'power-quality-summary'}
+        for name in shared:
+            self.assertEqual(set(SCREENS[name]),
+                             {'distribution_panel', 'transformer', 'lt_panel'})
+        self.assertEqual(set(SCREENS['energy-distribution']), {'distribution_panel'})
+        for name in expected - shared - {'energy-distribution'}:
+            self.assertEqual(set(SCREENS[name]), {'transformer', 'lt_panel'})
 
 
 class Reject4404Tests(TransactionTestCase):
@@ -87,9 +95,27 @@ class Reject4404Tests(TransactionTestCase):
         self.assertEqual(frame['mfm_id'], 'abc')
         self.assertEqual(code, {'type': 'websocket.close', 'code': 4404})
 
-    def test_valid_id_also_rejected_while_no_screen_registered(self):
+    def test_distribution_panel_is_rejected_by_single_mfm_screen(self):
         g = Group.objects.create(logger_id='grp_p9', name='MCC-9', slug='mcc-9', is_panel=True)
         frame, code = async_to_sync(self._connect_and_close)(f'/ws/mfm/{g.id}/overview/')
         self.assertEqual(frame['type'], 'error')
         self.assertEqual(frame['code'], 4404)
         self.assertEqual(code, {'type': 'websocket.close', 'code': 4404})
+
+    async def _panel_snapshot(self, panel_id):
+        comm = WebsocketCommunicator(
+            application, f'/ws/mfm/{panel_id}/energy-distribution/')
+        connected, _ = await comm.connect()
+        frame = await comm.receive_json_from()
+        await comm.disconnect()
+        return connected, frame
+
+    def test_distribution_panel_serves_aggregate_screen(self):
+        panel = Group.objects.create(
+            logger_id='grp_p10', name='PCC-10', slug='pcc-10', is_panel=True)
+        connected, frame = async_to_sync(self._panel_snapshot)(panel.id)
+        self.assertTrue(connected)
+        self.assertEqual(frame['type'], 'snapshot')
+        self.assertEqual(frame['mfm_id'], panel.id)
+        self.assertEqual(frame['widgets']['sources'], [])
+        self.assertEqual(frame['widgets']['consumers'], [])

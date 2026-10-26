@@ -9,6 +9,10 @@ Three pure-ish stages, deliberately split:
 Logger ids are the upsert keys and rows are soft-retired, never deleted, so the
 ids the frontend puts in URLs survive a rename, a move or a disappearance.
 
+Rows with NO logger id were built in the admin. The importer never updates,
+retires, re-slugs or strips the memberships/twins/edges of such a row, and
+reserves its slug (``manual_slugs``) so an imported row cannot take it.
+
 Contract: a second run against unchanged logger state reports create 0 /
 update 0 / retire 0 for every entity.
 """
@@ -102,7 +106,15 @@ class DesiredState:
     fetched_at: object = None
 
 
-def fetch(client, dsn_by_target, *, include_twins=True, include_edges=True):
+def manual_slugs():
+    """Active slugs of rows built in the admin — pass to ``fetch`` so the
+    importer's tree-wide slug allocation steps around them."""
+    return {*Group.objects.filter(active=True, logger_id=None).values_list('slug', flat=True),
+            *MFM.objects.filter(active=True, logger_id=None).values_list('slug', flat=True)}
+
+
+def fetch(client, dsn_by_target, *, include_twins=True, include_edges=True,
+          reserved_slugs=()):
     """Read the logger over HTTP and map it. No DB access at all."""
     devices = client.devices()
     tables = client.tables(status='migrated')
@@ -112,7 +124,8 @@ def fetch(client, dsn_by_target, *, include_twins=True, include_edges=True):
         twins = {gid: [t.get('id') for t in (client.group_twins(gid) or []) if t.get('id')]
                  for gid in _tree_ids(tree)}
     edges = client.device_edges() if include_edges else None
-    return build(tree, devices, tables, dsn_by_target, twins=twins, edges=edges)
+    return build(tree, devices, tables, dsn_by_target, twins=twins, edges=edges,
+                 reserved_slugs=reserved_slugs)
 
 
 def _tree_ids(nodes):
@@ -126,7 +139,8 @@ def _tree_ids(nodes):
     return out
 
 
-def build(tree, devices, tables, dsn_by_target, *, twins=None, edges=None):
+def build(tree, devices, tables, dsn_by_target, *, twins=None, edges=None,
+          reserved_slugs=()):
     """Pure mapping of the four API payloads into a DesiredState."""
     problems = []
     dev_by_id = {d['id']: d for d in (devices or []) if d.get('id')}
@@ -135,7 +149,8 @@ def build(tree, devices, tables, dsn_by_target, *, twins=None, edges=None):
     # LoggerFast group literally named "HVAC Panels" cannot steal 'hvac-panels'
     # from the category and send the FE's slug->node fallback to the wrong node.
     # backend2 hit exactly this class of bug (backend2/core/views.py:185-196).
-    used_slugs = set(NAV_CATEGORY_SLUGS)
+    # Admin-built rows' slugs are reserved alongside for the same reason.
+    used_slugs = set(NAV_CATEGORY_SLUGS) | set(reserved_slugs)
     groups, memberships, first_group_slug = [], [], {}
     _walk(tree or [], None, None, groups, memberships, used_slugs,
           first_group_slug, dev_by_id, problems)
@@ -413,6 +428,16 @@ def _binding_fields(binding, ds_id):
             'data_source_id': ds_id}
 
 
+def _imported_memberships():
+    """Memberships the logger owns — both ends carry a logger id."""
+    return Membership.objects.exclude(group__logger_id=None).exclude(mfm__logger_id=None)
+
+
+def _imported_edges():
+    """Feed edges the logger owns — both meters carry a logger id."""
+    return FeedEdge.objects.exclude(from_mfm__logger_id=None).exclude(to_mfm__logger_id=None)
+
+
 def diff(desired):
     """Compare the DesiredState with the DB. Reads only — never writes."""
     out = Diff(problems=list(desired.problems),
@@ -441,7 +466,7 @@ def diff(desired):
          if changes else _bump(e))
 
     # --- MFMs ---------------------------------------------------------------
-    db_mfms = {m.logger_id: m for m in MFM.objects.all()}
+    db_mfms = {m.logger_id: m for m in MFM.objects.exclude(logger_id=None)}
     e = out.entities['mfms']
     for want in desired.mfms:
         row = db_mfms.get(want['logger_id'])
@@ -479,7 +504,7 @@ def diff(desired):
         (e.update.append(_entry(logger_id, row.name, changes)) if changes else _bump(e))
 
     # --- groups -------------------------------------------------------------
-    db_groups = {g.logger_id: g for g in Group.objects.all()}
+    db_groups = {g.logger_id: g for g in Group.objects.exclude(logger_id=None)}
     group_pk_by_logger = {lid: g.pk for lid, g in db_groups.items()}
     e = out.entities['groups']
     for want in desired.groups:
@@ -526,7 +551,7 @@ def diff(desired):
     # --- memberships --------------------------------------------------------
     e = out.entities['memberships']
     db_members = {}
-    for m in Membership.objects.select_related('group', 'mfm'):
+    for m in _imported_memberships().select_related('group', 'mfm'):
         db_members[(m.group.logger_id, m.mfm.logger_id)] = m
     wanted_members = {(m['group_logger_id'], m['mfm_logger_id']): m
                       for m in desired.memberships}
@@ -548,8 +573,8 @@ def diff(desired):
         e.skipped = True
     else:
         db_twins = {}
-        for g in Group.objects.prefetch_related('twins'):
-            db_twins[g.logger_id] = sorted(t.logger_id for t in g.twins.all())
+        for g in Group.objects.exclude(logger_id=None).prefetch_related('twins'):
+            db_twins[g.logger_id] = sorted(t.logger_id for t in g.twins.all() if t.logger_id)
         def _twin_label(logger_id, ids):
             return f'{gname.get(logger_id, logger_id)} twins: ' + \
                    (', '.join(gname.get(t, t) for t in ids) or '(none)')
@@ -572,7 +597,7 @@ def diff(desired):
         e.skipped = True
     else:
         db_edges = {}
-        for edge in FeedEdge.objects.select_related('from_mfm', 'to_mfm'):
+        for edge in _imported_edges().select_related('from_mfm', 'to_mfm'):
             db_edges[(edge.from_mfm.logger_id, edge.to_mfm.logger_id)] = edge
         wanted_edges = {(x['from'], x['to']): x['edge_type'] for x in desired.edges}
         for key, edge_type in wanted_edges.items():
@@ -711,6 +736,7 @@ def apply(desired, diff, *, now=None):
         # different instance, and _seed_panel_kind needs the PanelConfig row
         # _ensure_config_rows has just created.
         _apply_categories(desired, group_pk, mfm_pk, summary)
+        _ensure_equipment_rows()
     _reset_energy_directions()
     return summary
 
@@ -754,8 +780,9 @@ def _park_moving_slugs(desired):
     parked = {'group': {}, 'mfm': {}}
     for model, kind, wanted in ((Group, 'group', desired.groups), (MFM, 'mfm', desired.mfms)):
         by_logger = {w['logger_id']: w['slug'] for w in wanted}
-        for pk, logger_id, slug in model.objects.filter(active=True).values_list(
-                'pk', 'logger_id', 'slug'):
+        for pk, logger_id, slug in (model.objects.filter(active=True)
+                                    .exclude(logger_id=None)
+                                    .values_list('pk', 'logger_id', 'slug')):
             want_slug = by_logger.get(logger_id)
             if want_slug is None:                       # vanishing: releases its slug
                 parked[kind][pk] = slug
@@ -888,7 +915,7 @@ def _apply_memberships(desired, group_pk, mfm_pk, summary):
             defaults={'role': want['role'], 'position': want['position']})
         summary.bump('memberships', 'created' if created else 'kept')
         keep.add(row.pk)
-    stale = Membership.objects.exclude(pk__in=keep)
+    stale = _imported_memberships().exclude(pk__in=keep)
     deleted = stale.count()
     if deleted:
         stale.delete()
@@ -904,6 +931,8 @@ def _apply_twins(desired, group_pk, summary):
             continue
         group = Group.objects.get(pk=pk)
         target = [group_pk[t] for t in wanted if t in group_pk]
+        # a twin built in the admin is not the logger's to drop
+        target += [t.pk for t in group.twins.all() if t.logger_id is None]
         if sorted(t.pk for t in group.twins.all()) != sorted(target):
             group.twins.set(target)
             summary.bump('twins', 'set')
@@ -927,7 +956,7 @@ def _apply_edges(desired, mfm_pk, summary):
             row.save(update_fields=['edge_type'])
             summary.bump('edges', 'updated')
         keep.add(row.pk)
-    stale = FeedEdge.objects.exclude(pk__in=keep)
+    stale = _imported_edges().exclude(pk__in=keep)
     deleted = stale.count()
     if deleted:
         stale.delete()
@@ -937,7 +966,8 @@ def _apply_edges(desired, mfm_pk, summary):
 def _retire_vanished(desired, now, parked, summary):
     """Soft-retire what the logger no longer has; keep the id and the config row."""
     wanted_groups = {g['logger_id'] for g in desired.groups}
-    for group in Group.objects.filter(active=True).exclude(logger_id__in=wanted_groups):
+    for group in (Group.objects.filter(active=True).exclude(logger_id=None)
+                  .exclude(logger_id__in=wanted_groups)):
         Membership.objects.filter(group=group).delete()
         group.twins.clear()
         group.active = False
@@ -947,7 +977,8 @@ def _retire_vanished(desired, now, parked, summary):
         summary.bump('groups', 'retired')
 
     wanted_mfms = {m['logger_id'] for m in desired.mfms}
-    for mfm in MFM.objects.filter(active=True).exclude(logger_id__in=wanted_mfms):
+    for mfm in (MFM.objects.filter(active=True).exclude(logger_id=None)
+                .exclude(logger_id__in=wanted_mfms)):
         Membership.objects.filter(mfm=mfm).delete()
         FeedEdge.objects.filter(from_mfm=mfm).delete()
         FeedEdge.objects.filter(to_mfm=mfm).delete()
@@ -968,6 +999,17 @@ def _ensure_config_rows(summary):
     for mfm in MFM.objects.filter(active=True):
         meters += int(MfmConfig.objects.get_or_create(mfm=mfm)[1])
     summary.config_rows = {'panel_configs_created': panels, 'mfm_configs_created': meters}
+
+
+def _ensure_equipment_rows():
+    """Add backend-owned equipment metadata after category/type seeding."""
+    from core.equipment import (ensure_mfm_equipment, ensure_panel_equipment,
+                                ensure_primary_reference)
+    for group in Group.objects.filter(active=True, is_panel=True).select_related('config'):
+        ensure_panel_equipment(group)
+    for mfm in MFM.objects.filter(active=True).select_related('config', 'equipment'):
+        ensure_mfm_equipment(mfm)
+        ensure_primary_reference(mfm)
 
 
 def _reset_energy_directions():

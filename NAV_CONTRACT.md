@@ -4,8 +4,7 @@ FE-facing contract for the nav tree served by `backend_beta` (the LoggerFast-imp
 hierarchy). CMD_V2 is **not** modified by this project; this file is the spec its owner
 codes against.
 
-- Base URL: `http://<host>:8891` — archbox `http://127.0.0.1:8891`, LAN `http://192.168.1.20:8891`,
-  VPN `http://100.90.185.31:8891`.
+- Base URL: `http://<host>:18889` — on this host `http://10.80.200.2:18889`.
 - Endpoints: `GET /api/ems/`, `GET /api/mfm/<id>/config/`, `GET /api/status/`.
 - Plain JSON (no DRF envelope), no auth, CORS open in dev.
 
@@ -13,9 +12,11 @@ codes against.
 
 ## 1. Where the tree comes from
 
-LoggerFast owns the **structure**: a group tree of any depth, an `isPanel` flag, device
-memberships with a role, twins. `backend_beta` imports it and owns the **screens**, the
-**nameplate** data and the **nav category** the logger has no concept of.
+`backend_beta` owns the persisted **structure**: a group tree of any depth, an `isPanel`
+flag, device memberships with a role, twins, equipment metadata and feed edges. Rows linked
+by `logger_id` may be synchronized from LoggerFast; locally built rows remain backend-owned
+and are not touched by that importer. Beta also owns the **screens**, **nameplate** data and
+the **nav category** the logger has no concept of.
 
 The tree the FE receives is **exactly two container levels deep**, regardless of how deeply
 the logger nests its groups:
@@ -32,7 +33,7 @@ category  (one of eight, fixed order, always emitted)
 | group, `isPanel=true` | **distribution panel** at depth 1 — Overview + role groups |
 | device in a panel group | **member leaf** under its role group |
 | device in a plain group | **loose leaf** (flat single-meter node) |
-| device in no group | not in the tree; counted in `ungrouped_mfm_count` |
+| device in no group | a **loose leaf** when filed under a category by hand (§1.2); otherwise not in the tree, counted in `ungrouped_mfm_count` |
 
 ### 1.1 The two placement axes
 
@@ -47,10 +48,28 @@ from one another: `panel_kind` says what a row *is*, `nav_category` says where i
 | UPS Panels | `PanelConfig.panel_kind = 'ups_panel'` |
 | APFC / Utility / Production / HVAC Panels | `Group.nav_category` / `MFM.nav_category` |
 
+A meter has no `panel_kind`, so `MFM.nav_category` may name **any** of the eight — a standalone
+meter can sit straight under HT Panels.
+
 `panel_kind`'s default, `distribution_panel`, places nothing — such a row falls through to
 `nav_category`, and then to its ancestors. Both fields are seeded from the row's name by the
 importer and correctable in the Django admin; a hand-edited value is pinned
 (`nav_category_source='manual'`) and never reseeded.
+
+### 1.2 Hand-built rows (the admin)
+
+Panels and meters can also be built in the Django admin (**EMS Nav** page → per-category
+*+ Distribution panel* / *+ MFM*):
+
+- **Distribution panel** — one *Category* dropdown (any of the eight; written onto
+  `panel_kind` for HT/AMF/PCC/UPS, onto `nav_category` otherwise) plus **Incomers**,
+  **Outgoers** and **Spares**, each an MFM (`Membership.role`). No `logger_id`.
+- **MFM** — optionally linked to a LoggerFast device (`logger_id`); picking one fills the table
+  name, data source and device details. A meter in **no** group whose category was set by hand
+  (`nav_category_source='manual'`) renders as a loose leaf directly under that category. An
+  imported ungrouped device carrying only the importer's guess (`'auto'`) still does not.
+- The importer never updates, retires or re-slugs a row with no `logger_id`, never strips the
+  memberships/twins/edges that touch one, and reserves its slug.
 
 Rules:
 
@@ -92,7 +111,7 @@ Rules:
 | `count` | number of root nodes — now always **8**, the fixed category spine |
 | `leaf_count` | metered leaves only (member leaves + loose leaves) |
 | `matched_mfm_count` | distinct meters in the tree that have BOTH a data source and a table name |
-| `ungrouped_mfm_count` | active meters with no membership (imported, not in the nav) |
+| `ungrouped_mfm_count` | active meters with no membership and not filed under a category by hand — not in the nav |
 | `uncategorised_panel_count` | **new** — active panels neither axis places, so not rendered |
 | `uncategorised_mfm_count` | **new** — loose meters neither axis places, so not rendered |
 
@@ -114,8 +133,8 @@ Rules:
 ```
 
 The eight, in emit order: `ht` `ht-panels`, `amf` `amf-panels`, `pcc` `pcc-panels`,
-`apfc` `apfc-panels`, `ups` `ups-panels`, `utility` `utility-panels`,
-`production` `production-panels`, `hvac` `hvac-panels`.
+`ups` `ups-panels`, `apfc` `apfc-panels`, `production` `production-panels`,
+`utility` `utility-panels`, `hvac` `hvac-panels`.
 
 - `kind` stays `'section'` — a category is semantically what a section was (an unmetered
   container with its own route), so the FE's `kind` branch is unchanged. After this change
@@ -130,7 +149,7 @@ The eight, in emit order: `ht` `ht-panels`, `amf` `amf-panels`, `pcc` `pcc-panel
 
 ```json
 {
-  "id": "grp-grp_mcc1", "label": "MCC-1", "slug": "mcc-1", "key": "mcc-1",
+  "id": "grp-4", "label": "MCC-1", "slug": "mcc-1", "key": "mcc-1",
   "kind": "panel", "distribution_panel": true,
   "mfm_id": 4, "mfm_name": "MCC-1",
   "bus_kv": 11.0, "model_slug": null,
@@ -140,8 +159,11 @@ The eight, in emit order: `ht` `ht-panels`, `amf` `amf-panels`, `pcc` `pcc-panel
 }
 ```
 
+- `id` = `grp-<Group.id>` — the same number as `mfm_id`. Child node ids extend it
+  (`grp-4-overview`, `grp-4-outgoing`, `grp-4-mfm-<meter id>`).
 - `mfm_id` = `Group.id`, **always < 1 000 000** — the id the aggregate screens are
   addressed by (`ws/mfm/<id>/…`, `/api/mfm/<id>/config/`).
+- `logger_id` = the LoggerFast group id, or **`null`** for a panel built in the admin.
 - `key` = the panel slug (beta has no `Equipment.key`).
 - `twins` = slugs of the sibling panels tied to this one (empty list when none).
 - `category` = **new** — the category id this panel is filed under, so the FE can build a
@@ -156,13 +178,13 @@ The eight, in emit order: `ht` `ht-panels`, `amf` `amf-panels`, `pcc` `pcc-panel
 Overview child:
 
 ```json
-{ "id": "grp-grp_mcc1-overview", "label": "Overview", "slug": "overview" }
+{ "id": "grp-4-overview", "label": "Overview", "slug": "overview" }
 ```
 
 Role group (`incoming` / `outgoing` / `spare`; **empty ones are omitted**):
 
 ```json
-{ "id": "grp-grp_mcc1-outgoing", "label": "Outgoing", "slug": "outgoing",
+{ "id": "grp-4-outgoing", "label": "Outgoing", "slug": "outgoing",
   "group": true, "alwaysOpen": true, "children": [ …member leaves… ] }
 ```
 
@@ -170,10 +192,10 @@ Role group (`incoming` / `outgoing` / `spare`; **empty ones are omitted**):
 
 ```json
 {
-  "id": "grp-grp_mcc1-mfm-1000003", "label": "MFM-03", "slug": "mfm-03",
+  "id": "grp-4-mfm-1000003", "label": "MFM-03", "slug": "mfm-03",
   "mfm_id": 1000003, "mfm_name": "MFM-03", "key": "mfm-03",
   "role": "outgoing", "logger_device_id": "dev_03",
-  "mfm_row": null, "breaker_type": null,
+  "mfm_row": 4, "breaker_type": "MCCB",
   "nominal_kv": 0.41, "distribution_panel": false
 }
 ```
@@ -183,8 +205,9 @@ Role group (`incoming` / `outgoing` / `spare`; **empty ones are omitted**):
 - `id` is **scoped to the panel**, so the same meter under two panels yields two nodes.
 - `key` = the **meter slug** (in backend2 it was the mapped device's `Equipment.key`).
 - `role` is new: `incoming | outgoing | spare`.
-- `mfm_row` and `breaker_type` are always `null` — the logger has no sheet row and no
-  breaker register.
+- `logger_device_id` = the linked LoggerFast device id, or `null` for a meter not linked yet.
+- `mfm_row` is the optional source spreadsheet row and `breaker_type` is optional static
+  breaker metadata (`ACB | MCCB | MCB | VCB | unknown`). Neither is live telemetry.
 
 ### 3.4 Loose leaf (a meter attached straight to a plain group)
 
@@ -236,19 +259,19 @@ PCC Panels          eq-pcc         /electrical/pcc-panels
     ├── Overview
     ├── Incoming  → MFM-01                      mfm_id 1000001
     └── Outgoing  → MFM-02, MFM-03              mfm_id 1000002, 1000003
-APFC Panels         eq-apfc        /electrical/apfc-panels        (empty)
 UPS Panels          eq-ups         /electrical/ups-panels         (empty)
-Utility Panels      eq-utility     /electrical/utility-panels
-└── Lighting DB   panel                         mfm_id 6
-    ├── Overview
-    ├── Incoming  → MFM-03  ← SAME meter as MCC-1's outgoer:
-    │                          mfm_id 1000003, id grp-grp_ldb-mfm-1000003
-    └── Outgoing  → MFM-04
+APFC Panels         eq-apfc        /electrical/apfc-panels        (empty)
 Production Panels   eq-production  /electrical/production-panels
 └── MCC-2     panel  twins: [mcc-1]  mfm_id 5   ← inherited from Block A
     ├── Overview
     ├── Incoming  → MFM-05
     └── Outgoing  → MFM-06
+Utility Panels      eq-utility     /electrical/utility-panels
+└── Lighting DB   panel                         mfm_id 6
+    ├── Overview
+    ├── Incoming  → MFM-03  ← SAME meter as MCC-1's outgoer:
+    │                          mfm_id 1000003, id grp-6-mfm-1000003
+    └── Outgoing  → MFM-04
 HVAC Panels         eq-hvac        /electrical/hvac-panels
 └── MFM-09    loose leaf  eq-mfm-1000007        ← inherited from Yard
 ```
@@ -256,8 +279,9 @@ HVAC Panels         eq-hvac        /electrical/hvac-panels
 Envelope: `count 8, leaf_count 8, matched_mfm_count 3, ungrouped_mfm_count 1,
 uncategorised_panel_count 0, uncategorised_mfm_count 0`.
 
-Note the ordering consequence: MCC-2 renders **after** Lighting DB even though it sorts before
-it in the logger tree, because categories order the sidebar, not sibling order.
+Note the ordering consequence: categories order the sidebar, not sibling order. MCC-1, MCC-2
+and Lighting DB are siblings under Block A in the logger tree, yet they render in three
+different categories, each at the position its category holds in the fixed list.
 
 ## 5. `GET /api/mfm/<id>/config/`
 
@@ -272,7 +296,8 @@ it in the logger tree, because categories order the sidebar, not sibling order.
 - `mfm_type` vocabulary: `distribution_panel | pcc_panel | ht_panel | amf_panel | ups_panel`
   (panels, from `PanelConfig.panel_kind` — `amf_panel` and `ups_panel` are **new**) and
   `lt_panel | transformer` (meters, from `MfmConfig.device_type`).
-- `object` is always `null` — 3D resolution is out of scope in beta.
+- `object` is resolved from the mapped equipment's viewer rule when configured;
+  otherwise it is `null`.
 - Unknown / retired id → `404 {"detail": "not found"}`.
 
 ## 6. `GET /api/status/`
@@ -289,7 +314,7 @@ never raises.
 
 ## 7. Diff vs today's backend2 `/api/ems/` (:8889)
 
-| area | backend2 (:8889) | backend_beta (:8891) |
+| area | backend2 (:8889) | backend_beta (:18889) |
 |---|---|---|
 | source | hardcoded `core/ems_tree.py` SECTIONS | **DB state** (`panel_kind` / `nav_category`), seeded from the name by the importer, corrected in the admin |
 | depth | exactly 2 (7 fixed sections → panels) | exactly 2 (8 fixed categories → panels / loose leaves) |
@@ -300,12 +325,12 @@ never raises.
 | `matched_mfm_count` | leaves carrying an `mfm_id` | distinct meters that are actually bound to a table |
 | section id | `eq-<section>` | `eq-<category id>` (same scheme) |
 | section fields | `id,label,slug,pathOverride,model_slug,children` | **+ `kind:'section'`, `category`, `sort_order`**; no `logger_id` |
-| panel id | `eq-<section>-<pslug>` | `grp-<logger_id>` |
+| panel id | `eq-<section>-<pslug>` | `grp-<Group.id>` |
 | panel fields | `key` = `Equipment.key`, `kind` = `Equipment.kind`, optional `parent_label` | `key` = slug, `kind` always `'panel'`, **+ `logger_id`, `twins[]`, `category`**, optional `parent_label` |
-| member leaf id | `eq-mfm-<mfm_id>` (globally one node per meter) | `grp-<logger_id>-mfm-<mfm_id>` (**one node per membership**) |
+| member leaf id | `eq-mfm-<mfm_id>` (globally one node per meter) | `grp-<Group.id>-mfm-<mfm_id>` (**one node per membership**) |
 | meter in two panels | impossible (one `reference` panel per meter) | **supported** — two leaves, same `mfm_id` |
 | leaf `key` | mapped device's `Equipment.key`, or `null` | the meter slug |
-| leaf fields | `mfm_row` = sheet row, `breaker_type` from `Breaker` | both always `null`; **+ `role`, `logger_device_id`, `distribution_panel:false`** |
+| leaf fields | `mfm_row` = sheet row, `breaker_type` from `Breaker` | available when configured; **+ `role`, `logger_device_id`, `distribution_panel:false`** |
 | role groups | Incoming / Outgoing / Spare / **Bus Coupler** | Incoming / Outgoing / Spare (the logger's vocabulary) |
 | `model_slug` | validated `kit_preview` catalog slug | always `null` (3D not wired in beta) |
 | flat panels | `mfm_ids` node built from the section `mode` | only the loose-leaf case, same shape |
@@ -320,7 +345,8 @@ never raises.
 2. Key nodes by `id`, not by `mfm_id` (`mfm_id` is no longer unique across the tree).
 3. Read `kind:'section'` vs `kind:'panel'` + `distribution_panel` to choose the tab set.
 4. Drop the Bus Coupler role group; render `role` from the leaf when a label is needed.
-5. Treat `model_slug`, `mfm_row`, `breaker_type` and `object` as absent for now.
+5. Treat `model_slug` and `object` as absent for now. `mfm_row` and `breaker_type` are
+   nullable metadata and must not be interpreted as live breaker state.
 6. Route containers at `/electrical/<category slug>` (one segment) and panels at
    `/electrical/<category slug>/<panel slug>`. Deeper section paths no longer exist.
 7. `mfm_type` gained `amf_panel` and `ups_panel` — handle them wherever `pcc_panel` /

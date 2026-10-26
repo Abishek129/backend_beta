@@ -1,7 +1,20 @@
 # deploy
 
-1. `cp deploy/cmd-backend-beta.service ~/.config/systemd/user/`
-2. `systemctl --user daemon-reload`
-3. `systemctl --user enable --now cmd-backend-beta.service` (logs: `journalctl --user -u cmd-backend-beta -f`)
-4. Serves on **:8891** — http://127.0.0.1:8891/admin/ , LAN 192.168.1.20, VPN 100.90.185.31.
-5. Secrets/knobs come from `/home/rohith/CMD/backend_beta/.env` (optional; see `.env.example`).
+The persistent user service runs Daphne from this checkout on port **18889**.
+
+```bash
+systemctl --user link /home/rohithdev/EMSbackend/deploy/cmd-backend-beta.service
+systemctl --user daemon-reload
+systemctl --user enable --now cmd-backend-beta.service
+systemctl --user status cmd-backend-beta.service
+journalctl --user -u cmd-backend-beta.service -f
+```
+
+User lingering must be enabled so the user manager starts at boot even without a login:
+`loginctl show-user rohithdev -p Linger` should print `Linger=yes` (already enabled on this host).
+
+- Admin: `http://10.80.200.2:18889/admin/`
+- EMS tree: `http://10.80.200.2:18889/api/ems/`
+- Runtime settings and secrets come from `/home/rohithdev/EMSbackend/.env` (loaded by Django).
+- If the virtual environment or checkout is moved, update `WorkingDirectory` and `ExecStart`
+  in the unit, then run `systemctl --user daemon-reload` and restart the service.

@@ -12,7 +12,7 @@ import sys
 from django.conf import settings
 from django.core.management.base import BaseCommand, CommandError
 
-from core.importer import DEFAULT_DSN_KEY, apply, diff, fetch, report
+from core.importer import DEFAULT_DSN_KEY, apply, diff, fetch, manual_slugs, report
 from core.logger_client import LoggerApiError, LoggerClient
 
 DEFAULT_URL = 'http://127.0.0.1:8003'
@@ -58,7 +58,8 @@ class Command(BaseCommand):
         try:
             desired = fetch(client, self._dsn_by_target(opts),
                             include_twins=not opts['skip_twins'],
-                            include_edges=not opts['skip_edges'])
+                            include_edges=not opts['skip_edges'],
+                            reserved_slugs=manual_slugs())
         except LoggerApiError as exc:
             raise CommandError(f'LoggerFast at {url}: {exc}')
 

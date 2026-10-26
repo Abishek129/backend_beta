@@ -1,0 +1,95 @@
+{% extends "admin/base_site.html" %}
+{% load i18n %}
+
+{% block extrastyle %}{{ block.super }}
+<style>
+  .ems-summary { display: flex; flex-wrap: wrap; gap: .5rem 1.5rem; margin-bottom: 1rem; }
+  .ems-cat .card-header { display: flex; flex-wrap: wrap; align-items: center;
+                          justify-content: space-between; gap: .5rem; }
+  .ems-cat .card-header::after { display: none; }
+  .ems-cat .card-title { float: none; }
+  .ems-actions { display: flex; flex-wrap: wrap; gap: .4rem; }
+  .ems-panel { margin-bottom: .75rem; }
+  .ems-panel:last-child { margin-bottom: 0; }
+  .ems-role { margin: .2rem 0 0 1.6rem; }
+  .ems-role-name { display: inline-block; min-width: 5.5rem; font-weight: 600; opacity: .7; }
+  .ems-empty { opacity: .6; font-style: italic; }
+  .ems-kind { opacity: .6; font-size: .85em; }
+</style>
+{% endblock %}
+
+{% block content_title %}EMS Nav{% endblock %}
+
+{% block breadcrumbs %}
+<ol class="breadcrumb">
+  <li class="breadcrumb-item"><a href="{% url 'admin:index' %}">{% trans 'Home' %}</a></li>
+  <li class="breadcrumb-item active">EMS Nav</li>
+</ol>
+{% endblock %}
+
+{% block content %}
+{% if request.user.is_superuser %}
+<p><a class="btn btn-primary" href="{{ import_url }}"><i class="fas fa-file-excel"></i> Import Excel workbook</a></p>
+{% endif %}
+<div class="ems-summary">
+  <span><strong>{{ data.leaf_count }}</strong> meter node(s) in the sidebar</span>
+  {% if data.uncategorised_panel_count %}
+    <a href="{{ panels_url }}?category=none" class="text-warning">
+      <strong>{{ data.uncategorised_panel_count }}</strong> panel(s) with no category — not shown</a>
+  {% endif %}
+  {% if data.uncategorised_mfm_count %}
+    <span class="text-warning"><strong>{{ data.uncategorised_mfm_count }}</strong> loose meter(s) with no category — not shown</span>
+  {% endif %}
+  {% if data.ungrouped_mfm_count %}
+    <span><strong>{{ data.ungrouped_mfm_count }}</strong> meter(s) not placed anywhere
+      (no panel, no category)</span>
+  {% endif %}
+</div>
+
+{% for cat in categories %}
+<div class="card ems-cat">
+  <div class="card-header">
+    <h3 class="card-title">
+      {{ cat.label }}
+      <span class="ems-kind">— {{ cat.panels|length }} panel(s), {{ cat.meters|length }} meter(s)</span>
+    </h3>
+    <div class="ems-actions">
+      <a class="btn btn-sm btn-primary" href="{{ panel_add_url }}?category={{ cat.id }}">
+        <i class="fas fa-plus"></i> Distribution panel</a>
+      <a class="btn btn-sm btn-outline-primary" href="{{ mfm_add_url }}?nav_category={{ cat.id }}">
+        <i class="fas fa-plus"></i> MFM</a>
+    </div>
+  </div>
+  <div class="card-body">
+    {% for p in cat.panels %}
+      <div class="ems-panel">
+        <i class="fas fa-bolt fa-fw"></i>
+        <a href="{{ p.url }}"><strong>{{ p.name }}</strong></a>
+        <span class="ems-kind">distribution panel</span>
+        {% for role, leaves in p.roles %}
+          <div class="ems-role">
+            <span class="ems-role-name">{{ role }}</span>
+            {% for m in leaves %}
+              <a href="{{ m.url }}">{{ m.name }}</a>{% if not m.bound %} <span class="badge badge-warning">no table</span>{% endif %}{% if not forloop.last %}, {% endif %}
+            {% endfor %}
+          </div>
+        {% empty %}
+          <div class="ems-role ems-empty">No incomers, outgoers or spares yet.</div>
+        {% endfor %}
+      </div>
+    {% endfor %}
+    {% for m in cat.meters %}
+      <div class="ems-panel">
+        <i class="fas fa-gauge-high fa-fw"></i>
+        <a href="{{ m.url }}">{{ m.name }}</a>
+        <span class="ems-kind">MFM</span>
+        {% if not m.bound %}<span class="badge badge-warning">no table</span>{% endif %}
+      </div>
+    {% endfor %}
+    {% if not cat.panels and not cat.meters %}
+      <span class="ems-empty">Empty — still shown in the sidebar, with no children.</span>
+    {% endif %}
+  </div>
+</div>
+{% endfor %}
+{% endblock %}

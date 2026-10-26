@@ -22,8 +22,8 @@ from bms.routing import websocket_urlpatterns as bms_ws  # noqa: E402
 from panels.routing import websocket_urlpatterns as panel_ws  # noqa: E402
 
 # Wrap HTTP so Daphne serves admin/jazzmin static (CSS/JS) in DEBUG.
-# PIN 2026-09-09: assets/bms route lists are empty (no consumers yet); panels
-# carries only the invalid-id catch-all until screens are registered.
+# Assets/BMS route lists remain empty; panels carries the registered single-MFM
+# routes plus the invalid-id catch-all.
 application = ProtocolTypeRouter({
     'http': ASGIStaticFilesHandler(django_asgi_app),
     'websocket': URLRouter(panel_ws + asset_ws + bms_ws),

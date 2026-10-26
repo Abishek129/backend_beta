@@ -1,21 +1,23 @@
-"""core app — the plant hierarchy imported from LoggerFast.
+"""core app — backend-owned plant hierarchy with optional LoggerFast links.
 
-LoggerFast owns the STRUCTURE (group tree, memberships, roles, table bindings,
-device edges); beta owns the SCREENS and the NAMEPLATE data the logger has no
-concept of. So each logger object maps to one row here keyed on its logger id,
-and every panel/meter gets a config row we own.
+Groups, memberships, roles, equipment metadata and nameplates live here. Rows
+carrying a LoggerFast id may be synchronized from its hierarchy/catalog; rows
+without one are entirely local and are never touched by that importer.
 
 Id scheme (core.constants.FEEDER_ID_OFFSET):
     Group.id            -> distribution-panel eid (always < 1_000_000)
     FEEDER_ID_OFFSET+MFM.id -> single-panel (per-meter) eid
 Logger ids are the upsert keys; rows are soft-retired, never deleted, so ids and
-FE URLs stay stable across re-imports.
+FE URLs stay stable across re-imports. A row with NO logger id was built by hand
+in the admin and is invisible to the importer.
 """
 from django.core.exceptions import ObjectDoesNotExist, ValidationError
+from django.core.validators import RegexValidator
 from django.db import models
 
 from core.constants import FEEDER_ID_OFFSET
-from core.nav_categories import NAV_CATEGORY_CHOICES, NAV_CATEGORY_SOURCE_CHOICES
+from core.nav_categories import (MFM_NAV_CATEGORY_CHOICES, NAV_CATEGORY_CHOICES,
+                                 NAV_CATEGORY_SOURCE_CHOICES)
 
 
 class DataSource(models.Model):
@@ -44,15 +46,168 @@ class DataSource(models.Model):
         return self.name
 
 
+_LOGGER_IDENTIFIER = RegexValidator(
+    regex=r'^[A-Za-z_][A-Za-z0-9_]*$',
+    message='Use a safe SQL identifier (letters, numbers and underscores; not starting with a number).',
+)
+
+
+class LoggerSchema(models.Model):
+    """Versioned identity of a reusable LoggerFast field layout."""
+
+    code = models.CharField(
+        max_length=64,
+        help_text='LoggerFast schema code, for example sch_EM6400_NG+.',
+    )
+    version = models.PositiveIntegerField(default=1)
+    name = models.CharField(max_length=120)
+    logger_id = models.CharField(
+        max_length=64, unique=True, null=True, blank=True,
+        help_text='LoggerFast internal schema id (sch_…), when known.',
+    )
+    timestamp_column = models.CharField(
+        max_length=100, default='timestamp', validators=[_LOGGER_IDENTIFIER],
+    )
+    description = models.TextField(blank=True, default='')
+    active = models.BooleanField(default=True, db_index=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        db_table = 'logger_schema'
+        ordering = ['code', 'version']
+        constraints = [
+            models.UniqueConstraint(
+                fields=['code', 'version'], name='uniq_logger_schema_code_version'),
+            models.CheckConstraint(
+                condition=models.Q(version__gte=1), name='logger_schema_version_gte_1'),
+        ]
+
+    def __str__(self):
+        return f'{self.name} ({self.code}_v{self.version})'
+
+
+class LoggerSchemaField(models.Model):
+    """One measured or derived field in a versioned LoggerFast schema."""
+
+    KIND_CHOICES = [('measured', 'Measured'), ('derived', 'Derived')]
+
+    logger_schema = models.ForeignKey(
+        LoggerSchema, on_delete=models.CASCADE, related_name='fields')
+    name = models.CharField(max_length=120)
+    kind = models.CharField(max_length=12, choices=KIND_CHOICES)
+    data_type = models.CharField(max_length=40)
+    unit = models.CharField(max_length=40, blank=True, default='')
+    address = models.CharField(max_length=64, blank=True, default='')
+    scale = models.FloatField(null=True, blank=True)
+    formula = models.TextField(blank=True, default='')
+    evaluation_order = models.PositiveIntegerField(null=True, blank=True)
+    position = models.PositiveIntegerField(default=0)
+    description = models.TextField(blank=True, default='')
+
+    class Meta:
+        db_table = 'logger_schema_field'
+        ordering = ['logger_schema', 'position', 'name']
+        constraints = [
+            models.UniqueConstraint(
+                fields=['logger_schema', 'name'], name='uniq_logger_schema_field_name'),
+            models.UniqueConstraint(
+                fields=['logger_schema', 'evaluation_order'],
+                condition=models.Q(evaluation_order__isnull=False),
+                name='uniq_logger_schema_field_eval_order'),
+        ]
+
+    def clean(self):
+        if self.kind == 'measured' and not self.address:
+            raise ValidationError({'address': 'A measured field requires a register address.'})
+        if self.kind == 'derived' and not self.formula:
+            raise ValidationError({'formula': 'A derived field requires a formula.'})
+
+    def __str__(self):
+        return f'{self.logger_schema.code}/{self.name}'
+
+
+class PanelType(models.Model):
+    """Stable classification for panel-like equipment."""
+    code = models.SlugField(max_length=40, unique=True)
+    name = models.CharField(max_length=100)
+
+    class Meta:
+        db_table = 'core_paneltype'
+        ordering = ['name']
+
+    def __str__(self):
+        return self.name
+
+
+class AssetType(models.Model):
+    """Stable classification for non-panel assets such as DG, UPS and solar."""
+    code = models.SlugField(max_length=40, unique=True)
+    name = models.CharField(max_length=100)
+
+    class Meta:
+        db_table = 'core_assettype'
+        ordering = ['name']
+
+    def __str__(self):
+        return self.name
+
+
+class Equipment(models.Model):
+    """Canonical thing measured by an MFM.
+
+    Navigation placement remains ``Group``/``Membership`` because beta permits
+    the same MFM to appear in more than one panel.  ``group`` optionally ties a
+    distribution-panel equipment row to its structural Group.
+    """
+    key = models.SlugField(max_length=120, unique=True)
+    name = models.CharField(max_length=150)
+    panel_type = models.ForeignKey(
+        PanelType, null=True, blank=True, on_delete=models.PROTECT,
+        related_name='equipment')
+    asset_type = models.ForeignKey(
+        AssetType, null=True, blank=True, on_delete=models.PROTECT,
+        related_name='equipment')
+    group = models.OneToOneField(
+        'Group', null=True, blank=True, on_delete=models.SET_NULL,
+        related_name='equipment')
+    distribution_panel = models.BooleanField(default=False)
+    metered = models.BooleanField(default=False)
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        db_table = 'equipment'
+        ordering = ['name']
+        constraints = [
+            models.CheckConstraint(
+                condition=(
+                    (models.Q(panel_type__isnull=False) & models.Q(asset_type__isnull=True))
+                    | (models.Q(panel_type__isnull=True) & models.Q(asset_type__isnull=False))
+                ),
+                name='equipment_exactly_one_type_family'),
+        ]
+
+    def clean(self):
+        if (self.panel_type_id is None) == (self.asset_type_id is None):
+            raise ValidationError('Choose exactly one of panel type or asset type.')
+
+    def __str__(self):
+        return self.name
+
+
 class Group(models.Model):
     """One LoggerFast group — a nav section, or (``is_panel``) a distribution panel.
 
     ``id`` doubles as the distribution-panel eid used by ``ws/mfm/<id>/`` and
     ``/api/mfm/<id>/config/``.
     """
+    # Blank (NULL) = built in the admin: the importer never updates, retires or
+    # strips the memberships of such a row.
     logger_id = models.CharField(
-        max_length=64, unique=True,
-        help_text='LoggerFast group id (grp_…) — the upsert key.')
+        max_length=64, unique=True, null=True, blank=True,
+        help_text='LoggerFast group id (grp_…) — the import upsert key. '
+                  'Blank = created in the admin; the importer never touches it.')
     name = models.CharField(max_length=150)
     slug = models.SlugField(max_length=120,
                             help_text='Stable FE identifier; unique among active groups.')
@@ -92,8 +247,28 @@ class Group(models.Model):
         return self.name
 
 
+class DistributionPanel(Group):
+    """Admin face of an ``is_panel`` Group: one Category dropdown plus its
+    Incomers / Outgoers / Spares. Same table, same ids."""
+
+    class Meta:
+        proxy = True
+        verbose_name = 'Distribution Panel'
+        verbose_name_plural = 'Distribution Panels'
+
+
+class EmsNav(Group):
+    """Admin-only page: the eight categories exactly as the sidebar renders
+    them, with an add-panel / add-MFM link on each. Owns no data."""
+
+    class Meta:
+        proxy = True
+        verbose_name = 'EMS Nav'
+        verbose_name_plural = 'EMS Nav'
+
+
 class MFM(models.Model):
-    """One LoggerFast device = one meter = one single-panel screen set.
+    """One meter = one single-panel screen set, optionally linked to LoggerFast.
 
     ``eid`` (FEEDER_ID_OFFSET + id) is the id the FE and the sockets address.
     The timeseries binding is ``data_source`` (connection) + ``table_name``.
@@ -112,8 +287,9 @@ class MFM(models.Model):
     ]
 
     logger_id = models.CharField(
-        max_length=64, unique=True,
-        help_text='LoggerFast device id (dev_…) — the upsert key.')
+        max_length=64, unique=True, null=True, blank=True,
+        help_text='LoggerFast device id (dev_…) this meter reads. Blank = not '
+                  'linked yet; the importer never touches an unlinked meter.')
     name = models.CharField(max_length=150)
     slug = models.SlugField(max_length=120,
                             help_text='Stable FE identifier; unique among active meters.')
@@ -122,12 +298,21 @@ class MFM(models.Model):
     unit_id = models.IntegerField(null=True, blank=True)
     port = models.IntegerField(null=True, blank=True)
     logger_status = models.CharField(max_length=40, blank=True, default='')
+    equipment = models.ForeignKey(
+        Equipment, null=True, blank=True, on_delete=models.SET_NULL,
+        related_name='mfms',
+        help_text='The canonical equipment or asset measured by this MFM.')
+    reference = models.ForeignKey(
+        Group, null=True, blank=True, on_delete=models.SET_NULL,
+        related_name='referenced_mfms',
+        help_text='Primary/legacy physical panel. Memberships remain authoritative '
+                  'when a meter appears in more than one panel.')
     nav_category = models.CharField(
-        max_length=16, choices=NAV_CATEGORY_CHOICES, blank=True, default='',
+        max_length=16, choices=MFM_NAV_CATEGORY_CHOICES, blank=True, default='',
         db_index=True,
-        help_text='Category for this meter when it renders as a LOOSE leaf. '
-                  'Blank = inherit from the plain group it sits in. Ignored for '
-                  'a meter inside a panel (the panel places it).')
+        help_text='Only for a meter that is NOT in a distribution panel: it then '
+                  'shows directly under this category. Ignored for a panel '
+                  'incomer/outgoer/spare (the panel places it).')
     nav_category_source = models.CharField(
         max_length=8, choices=NAV_CATEGORY_SOURCE_CHOICES, default='auto',
         help_text='manual = set by hand, the importer never reseeds it.')
@@ -136,8 +321,16 @@ class MFM(models.Model):
         DataSource, null=True, blank=True, on_delete=models.PROTECT,
         related_name='mfms',
         help_text='Shared DB connection — one pool per source for the socket layer.')
+    logger_schema = models.ForeignKey(
+        LoggerSchema, null=True, blank=True, on_delete=models.PROTECT,
+        related_name='mfms',
+        help_text='Versioned LoggerFast field layout used by this meter table.',
+    )
     table_name = models.CharField(max_length=100, blank=True, default='')
     logger_table_id = models.CharField(max_length=64, blank=True, default='')
+    series_id = models.CharField(
+        max_length=100, blank=True, default='', db_index=True,
+        help_text='Optional series discriminator when one logger table holds multiple series.')
     table_binding = models.CharField(max_length=12, choices=TABLE_BINDING_CHOICES,
                                      default='none')
     # Which energy register carries this meter's TRUE consumption on the real
@@ -147,6 +340,19 @@ class MFM(models.Model):
                                         default='sum')
     energy_scale = models.FloatField(default=1.0)
     power_scale = models.FloatField(default=1.0)
+    asset_category = models.CharField(max_length=64, blank=True, default='')
+    load_profile = models.CharField(max_length=64, blank=True, default='')
+    parent_series = models.CharField(max_length=100, blank=True, default='')
+    sheet_row = models.IntegerField(null=True, blank=True)
+    section = models.CharField(max_length=100, blank=True, default='')
+    zone = models.CharField(max_length=100, blank=True, default='')
+    # Finest-grain per-meter nameplate overrides. MfmConfig remains supported;
+    # these direct fields win during config resolution for backend2 parity.
+    rated_capacity_kva = models.FloatField(null=True, blank=True)
+    nominal_voltage_v = models.FloatField(null=True, blank=True)
+    nameplate_voltage_kv = models.FloatField(null=True, blank=True)
+    frequency_hz = models.FloatField(null=True, blank=True)
+    fault_level_ka = models.FloatField(null=True, blank=True)
     active = models.BooleanField(default=True)
     retired_at = models.DateTimeField(null=True, blank=True)
     imported_at = models.DateTimeField(null=True, blank=True)
@@ -358,6 +564,108 @@ class PanelConfig(NameplateBase):
         return f'config[{self.group.slug}]'
 
 
+class DistributionPanelThreshold(PanelConfig):
+    """Focused admin view of Group-owned panel limits, not duplicate settings."""
+    class Meta:
+        proxy = True
+        verbose_name = 'Distribution Panel Threshold'
+        verbose_name_plural = 'Distribution Panel Thresholds'
+
+
+class EquipmentConfig(NameplateBase):
+    """Nameplate/configuration owned by a canonical Equipment row."""
+    equipment = models.OneToOneField(
+        Equipment, on_delete=models.CASCADE, related_name='config')
+    rating = models.CharField(max_length=100, blank=True, default='')
+
+    class Meta:
+        db_table = 'equipment_config'
+        verbose_name = 'Equipment Config'
+        verbose_name_plural = 'Equipment Configs'
+
+    def __str__(self):
+        return f'config[{self.equipment.key}]'
+
+
+class Nameplate(models.Model):
+    """Traceable reference fact; operational config is kept separately."""
+    equipment = models.ForeignKey(
+        Equipment, on_delete=models.CASCADE, related_name='nameplates')
+    key = models.CharField(max_length=100)
+    value = models.CharField(max_length=255, blank=True, default='')
+    unit = models.CharField(max_length=40, blank=True, default='')
+    normalized_value = models.FloatField(null=True, blank=True)
+    confidence = models.FloatField(null=True, blank=True)
+    source = models.CharField(max_length=100, blank=True, default='')
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        db_table = 'nameplate'
+        ordering = ['equipment', 'key']
+        constraints = [
+            models.UniqueConstraint(fields=['equipment', 'key'],
+                                    name='uniq_nameplate_equipment_key'),
+        ]
+
+    def __str__(self):
+        return f'{self.equipment.key}/{self.key}'
+
+
+class ViewerAsset(models.Model):
+    """A catalogued 3D object and its model-level viewer defaults."""
+    slug = models.SlugField(max_length=120, unique=True)
+    label = models.CharField(max_length=150)
+    url = models.CharField(max_length=500)
+    rating = models.CharField(max_length=100, blank=True, default='')
+    defaults = models.JSONField(default=dict, blank=True)
+    active = models.BooleanField(default=True)
+
+    class Meta:
+        db_table = 'viewer_asset'
+        ordering = ['label']
+
+    def __str__(self):
+        return self.label
+
+
+class ViewerRule(models.Model):
+    """Logical Equipment.key/type to ViewerAsset binding."""
+    for_key = models.CharField(max_length=120, blank=True, default='', db_index=True)
+    for_type = models.CharField(max_length=64, blank=True, default='', db_index=True)
+    rating = models.CharField(max_length=100, blank=True, default='')
+    asset = models.ForeignKey(
+        ViewerAsset, on_delete=models.PROTECT, related_name='rules')
+    preset = models.JSONField(default=dict, blank=True)
+    priority = models.IntegerField(default=0)
+    active = models.BooleanField(default=True)
+
+    class Meta:
+        db_table = 'viewer_rule'
+        ordering = ['-priority', 'id']
+        constraints = [
+            models.CheckConstraint(
+                condition=~(models.Q(for_key='') & models.Q(for_type='')),
+                name='viewer_rule_has_key_or_type'),
+        ]
+
+    def __str__(self):
+        target = self.for_key or self.for_type
+        return f'{target} → {self.asset.slug}'
+
+
+class ViewerSetting(models.Model):
+    """Global viewer defaults and fallback asset slugs."""
+    key = models.CharField(max_length=100, unique=True)
+    value = models.JSONField(default=dict, blank=True)
+
+    class Meta:
+        db_table = 'viewer_setting'
+
+    def __str__(self):
+        return self.key
+
+
 class MfmConfig(NameplateBase):
     """Nameplate for one meter (a single-panel screen set)."""
     DEVICE_TYPE_CHOICES = [
@@ -381,6 +689,62 @@ class MfmConfig(NameplateBase):
         return f'config[{self.mfm.slug}]'
 
 
+class MfmThreshold(models.Model):
+    """Optional finest-grain PQ and overview thresholds for one MFM."""
+    mfm = models.OneToOneField(MFM, on_delete=models.CASCADE, related_name='thresholds')
+    i_thd_limit_pct = models.FloatField('Power Quality — Current THD limit (%)', null=True, blank=True)
+    v_thd_limit_pct = models.FloatField('Power Quality — Voltage THD limit (%)', null=True, blank=True)
+    individual_harmonic_limit_pct = models.FloatField('Power Quality — Individual harmonic limit (%)', null=True, blank=True)
+    flicker_pst_limit = models.FloatField('Power Quality — Flicker Pst limit', null=True, blank=True)
+    crest_factor_ideal = models.FloatField('Power Quality — Ideal crest factor', null=True, blank=True)
+    overview_busbar_temp_warn_c = models.FloatField('Busbar Temperature — Warning above (°C)', null=True, blank=True)
+    overview_busbar_temp_critical_c = models.FloatField('Busbar Temperature — Critical above (°C)', null=True, blank=True)
+    overview_load_elevated_pct = models.FloatField('Rated Capacity Utilization — Elevated above (%)', null=True, blank=True)
+    overview_load_critical_pct = models.FloatField('Rated Capacity Utilization — Critical above (%)', null=True, blank=True)
+    overview_pf_good = models.FloatField('Power Factor — Good at or above', null=True, blank=True)
+    overview_pf_fair = models.FloatField('Power Factor — Fair at or above', null=True, blank=True)
+    overview_freq_nominal_hz = models.FloatField('Grid Frequency — Nominal (Hz)', null=True, blank=True)
+    overview_freq_fair_dev_hz = models.FloatField('Grid Frequency — Fair deviation above (Hz)', null=True, blank=True)
+    overview_freq_unstable_dev_hz = models.FloatField('Grid Frequency — Unstable deviation above (Hz)', null=True, blank=True)
+    overview_phase_watch_pct = models.FloatField('Current Unbalance — Watch above (%)', null=True, blank=True)
+    overview_phase_unbalanced_pct = models.FloatField('Current Unbalance — Unbalanced above (%)', null=True, blank=True)
+    overview_voltage_dev_elevated_pct = models.FloatField('Voltage Deviation — Elevated above (%)', null=True, blank=True)
+    overview_voltage_dev_critical_pct = models.FloatField('Voltage Deviation — Critical above (%)', null=True, blank=True)
+    overview_energy_elevated_pct = models.FloatField('Energy Consumption Today — Elevated above target usage (%)', null=True, blank=True)
+    overview_energy_critical_pct = models.FloatField('Energy Consumption Today — Critical above target usage (%)', null=True, blank=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        db_table = 'mfm_threshold'
+        verbose_name = 'MFM Threshold'
+        verbose_name_plural = 'MFM Thresholds'
+
+    def __str__(self):
+        return f'thresholds[{self.mfm.slug}]'
+
+
+class Breaker(models.Model):
+    """Static breaker metadata for one MFM; not live breaker state."""
+    BREAKER_TYPE_CHOICES = [
+        ('ACB', 'ACB'), ('MCCB', 'MCCB'), ('MCB', 'MCB'), ('VCB', 'VCB'),
+        ('unknown', 'Unknown'),
+    ]
+    mfm = models.OneToOneField(MFM, on_delete=models.CASCADE, related_name='breaker')
+    breaker_type = models.CharField(
+        max_length=12, choices=BREAKER_TYPE_CHOICES, default='unknown')
+    rating_a = models.FloatField(null=True, blank=True)
+    source = models.CharField(max_length=100, blank=True, default='')
+    glb_node = models.CharField(max_length=150, blank=True, default='')
+    panel_key = models.CharField(max_length=120, blank=True, default='')
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        db_table = 'breaker'
+
+    def __str__(self):
+        return f'{self.mfm.slug}: {self.breaker_type}'
+
+
 class RtmThreshold(models.Model):
     """Per-metric 5-band thresholds for a panel's Real-Time Monitoring grid
     (Low / Normal / Moderate / High / Critical).
@@ -394,7 +758,10 @@ class RtmThreshold(models.Model):
         ('volt', 'Voltage'), ('amp', 'Amps'), ('i_unbal', 'I Unbalance'),
         ('kva', 'kVA'), ('v_unbal', 'V Unbalance'),
     ]
-    group = models.ForeignKey(Group, on_delete=models.CASCADE, related_name='rtm_thresholds')
+    group = models.ForeignKey(Group, on_delete=models.CASCADE, related_name='rtm_thresholds',
+                              null=True, blank=True)
+    panel_type = models.ForeignKey(PanelType, on_delete=models.CASCADE,
+                                   related_name='rtm_thresholds', null=True, blank=True)
     metric = models.CharField(max_length=12, choices=METRIC_CHOICES)
     low_max = models.FloatField(help_text='upper edge of the Low band')
     normal_max = models.FloatField(help_text='upper edge of the Normal band')
@@ -407,10 +774,14 @@ class RtmThreshold(models.Model):
         verbose_name_plural = 'RTM Thresholds'
         constraints = [
             models.UniqueConstraint(fields=['group', 'metric'], name='uniq_rtm_group_metric'),
+            models.UniqueConstraint(fields=['panel_type', 'metric'], name='uniq_rtm_type_metric'),
+            models.CheckConstraint(condition=(
+                models.Q(group__isnull=False, panel_type__isnull=True) |
+                models.Q(group__isnull=True, panel_type__isnull=False)), name='rtm_exactly_one_scope'),
         ]
 
     def bounds(self):
         return (self.low_max, self.normal_max, self.moderate_max, self.high_max)
 
     def __str__(self):
-        return f'rtm[{self.group.slug}/{self.metric}]'
+        return f'rtm[{self.group.slug if self.group_id else self.panel_type.code}/{self.metric}]'

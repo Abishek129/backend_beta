@@ -1,0 +1,80 @@
+{% extends "admin/change_list.html" %}
+
+{% block extrastyle %}
+{{ block.super }}
+<style>
+  /* One scroll container owns both axes, so sticky headers and names align. */
+  .mfm-threshold-grid .table-responsive {
+    max-height: 65vh;
+    overflow: auto;
+    isolation: isolate;
+  }
+  .mfm-threshold-grid #result_list {
+    --mfm-offset: 0px;
+    border-collapse: separate;
+    border-spacing: 0;
+    margin-bottom: 0;
+  }
+  .mfm-threshold-grid #result_list:has(.action-checkbox) {
+    --mfm-offset: 3rem;
+  }
+  .mfm-threshold-grid #result_list thead th {
+    position: sticky;
+    top: 0;
+    z-index: 3;
+    background: #fff;
+    box-shadow: 0 2px 0 #dee2e6;
+  }
+  .mfm-threshold-grid #result_list .djn-checkbox-select-all,
+  .mfm-threshold-grid #result_list .action-checkbox {
+    position: sticky;
+    left: 0;
+    width: 3rem;
+    min-width: 3rem;
+    max-width: 3rem;
+    box-sizing: border-box;
+    z-index: 2;
+    background: #fff;
+  }
+  .mfm-threshold-grid #result_list:has(.action-checkbox) thead th:nth-child(2),
+  .mfm-threshold-grid #result_list:not(:has(.action-checkbox)) thead th:first-child,
+  .mfm-threshold-grid #result_list .field-mfm,
+  .mfm-threshold-grid #result_list .field-group {
+    position: sticky;
+    left: var(--mfm-offset);
+    min-width: 15rem;
+    max-width: 20rem;
+    overflow-wrap: anywhere;
+    z-index: 2;
+    background: #fff;
+    box-shadow: 2px 0 0 #dee2e6;
+  }
+  .mfm-threshold-grid #result_list tbody tr:nth-of-type(odd) .field-mfm,
+  .mfm-threshold-grid #result_list tbody tr:nth-of-type(odd) .field-group,
+  .mfm-threshold-grid #result_list tbody tr:nth-of-type(odd) .action-checkbox {
+    background: #f2f2f2;
+  }
+  .mfm-threshold-grid #result_list:has(.action-checkbox) thead th:nth-child(2),
+  .mfm-threshold-grid #result_list:not(:has(.action-checkbox)) thead th:first-child,
+  .mfm-threshold-grid #result_list thead .djn-checkbox-select-all {
+    z-index: 4;
+    background: #fff;
+  }
+  .mfm-threshold-grid #result_list input[type="number"] { min-width: 9rem; }
+  @media print {
+    .mfm-threshold-grid .table-responsive { max-height: none; overflow: visible; }
+    .mfm-threshold-grid #result_list th,
+    .mfm-threshold-grid #result_list td { position: static !important; }
+  }
+</style>
+{% endblock %}
+
+{% block result_list %}
+{% block threshold_instructions %}
+<p class="text-muted">Use the Page filter above to show only that page's thresholds, or All for every field. Voltage &amp; Current shares its current-balance limits with Overview. Other pages have no separate editable limits in this table.</p>
+<p class="text-muted">Scroll inside the table. MFM names stay on the left and threshold names stay at the top. Save before changing the Page filter.</p>
+{% endblock %}
+<div class="mfm-threshold-grid">
+  {{ block.super }}
+</div>
+{% endblock %}

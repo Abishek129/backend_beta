@@ -1,0 +1,27 @@
+{% extends "admin/change_list.html" %}
+
+{% block search %}
+<div class="col-12 mb-3">
+  <nav aria-label="RTM threshold metric" class="d-flex flex-wrap" style="gap: .5rem;">
+    {% for tab in metric_tabs %}
+      <a href="{{ tab.url }}" class="btn {% if tab.active %}btn-primary{% else %}btn-outline-primary{% endif %}"
+         {% if tab.active %}aria-current="page"{% endif %}>{{ tab.label }}</a>
+    {% endfor %}
+  </nav>
+  <div class="card mt-3 mb-0">
+    <div class="card-body py-3">
+      <h2 class="h5">{{ metric_title }} thresholds</h2>
+      <p class="mb-1">{{ metric_help }}</p>
+      <p class="mb-1 text-muted">
+        {% if metric_descending %}
+          Low ≥ first boundary; Normal ≥ second; Moderate ≥ third; High ≥ fourth; Critical below fourth.
+        {% else %}
+          Low &lt; first boundary; Normal &lt; second; Moderate &lt; third; High &lt; fourth; Critical ≥ fourth.
+        {% endif %}
+      </p>
+      <p class="mb-0 text-muted">Edit panel values below and click Save. Switching metric before saving discards unsaved edits. Reconnect monitoring screens after saving.</p>
+    </div>
+  </div>
+</div>
+{{ block.super }}
+{% endblock %}

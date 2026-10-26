@@ -4,7 +4,9 @@ that seeds them on import.
 TWO sources place a panel, and they are ORTHOGONAL:
 
     PanelConfig.panel_kind  -> HT / AMF / PCC / UPS   (structural switchgear)
-    Group|MFM.nav_category  -> HVAC / APFC / Production / Utility  (blank-able)
+    Group.nav_category      -> HVAC / APFC / Production / Utility  (blank-able)
+
+A meter has no panel_kind, so ``MFM.nav_category`` may name any of the eight.
 
 A blank ``nav_category`` means "this row is placed by ``panel_kind``". Never
 derive one axis from the other, and never widen one to cover the other:
@@ -25,10 +27,10 @@ NAV_CATEGORIES = [
     ('ht',         'HT Panels',         'ht-panels'),
     ('amf',        'AMF Panels',        'amf-panels'),
     ('pcc',        'PCC Panels',        'pcc-panels'),
-    ('apfc',       'APFC Panels',       'apfc-panels'),
     ('ups',        'UPS Panels',        'ups-panels'),
-    ('utility',    'Utility Panels',    'utility-panels'),
+    ('apfc',       'APFC Panels',       'apfc-panels'),
     ('production', 'Production Panels', 'production-panels'),
+    ('utility',    'Utility Panels',    'utility-panels'),
     ('hvac',       'HVAC Panels',       'hvac-panels'),
 ]
 
@@ -51,11 +53,12 @@ PANEL_KIND_CATEGORY = {
 }
 
 # --- axis 2: nav_category ----------------------------------------------------
-# The ONLY values nav_category may hold; the other four are panel_kind's job.
+# The ONLY values a GROUP's nav_category may hold; the other four are
+# panel_kind's job. (A meter has no panel_kind — see MFM_NAV_CATEGORY_CHOICES.)
 NAV_CATEGORY_CHOICES = [
     ('apfc',       'APFC Panels'),
-    ('utility',    'Utility Panels'),
     ('production', 'Production Panels'),
+    ('utility',    'Utility Panels'),
     ('hvac',       'HVAC Panels'),
 ]
 NAV_CATEGORY_CODES = frozenset(cid for cid, _label in NAV_CATEGORY_CHOICES)
@@ -67,6 +70,27 @@ NAV_CATEGORY_SOURCE_CHOICES = [
     ('auto',   'Auto — the importer heuristic may reseed it'),
     ('manual', 'Manual — set by hand, importer never touches it'),
 ]
+
+# A meter has no PanelConfig, so no panel_kind: its nav_category is its ONLY
+# axis and may name any of the eight (e.g. a standalone meter under HT Panels).
+MFM_NAV_CATEGORY_CHOICES = [(cid, label) for cid, label, _slug in NAV_CATEGORIES]
+
+# The admin's single "Category" dropdown on a panel, written back onto the two
+# axes — the exact inverse of what core.nav resolves, so no information is lost.
+CATEGORY_PANEL_KIND = {cid: kind for kind, cid in PANEL_KIND_CATEGORY.items()}
+
+
+def panel_axes(cid):
+    """Category id -> ``(panel_kind, nav_category)`` for a panel filed there.
+
+    HT/AMF/PCC/UPS are structural: they set ``panel_kind`` and leave
+    ``nav_category`` blank. The other four keep the 'distribution_panel' kind
+    and set ``nav_category``.
+    """
+    kind = CATEGORY_PANEL_KIND.get(cid)
+    if kind:
+        return kind, UNCATEGORISED
+    return 'distribution_panel', cid
 
 # ---------------------------------------------------------------------------
 # The classifier.

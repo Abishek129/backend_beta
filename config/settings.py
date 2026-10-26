@@ -48,7 +48,7 @@ INSTALLED_APPS = [
     'rest_framework',
     'core',
     'panels',
-    # PIN 2026-09-09: registered for structure (mirrors backend2); no models/consumers yet.
+    # Registered for structure (mirrors backend2); assets/BMS consumers are pending.
     'assets',
     'bms',
 ]
@@ -180,10 +180,12 @@ JAZZMIN_SETTINGS = {
     'site_brand': 'CMD Beta Admin',
     'welcome_sign': 'Welcome to CMD Beta Admin',
     'copyright': 'Neuract',
-    'search_model': ['core.Group', 'core.MFM'],
+    'search_model': ['core.DistributionPanel', 'core.MFM'],
     'icons': {
         'auth.User': 'fas fa-user',
         'auth.Group': 'fas fa-users',
+        'core.EmsNav': 'fas fa-sitemap',
+        'core.DistributionPanel': 'fas fa-bolt',
         'core.Group': 'fas fa-layer-group',
         'core.MFM': 'fas fa-gauge-high',
         'core.DataSource': 'fas fa-database',
@@ -193,10 +195,14 @@ JAZZMIN_SETTINGS = {
         'core.MfmConfig': 'fas fa-sliders',
         'core.RtmThreshold': 'fas fa-traffic-light',
     },
-    'order_with_respect_to': ['core', 'panels', 'auth'],
+    'order_with_respect_to': ['core', 'core.emsnav', 'core.distributionpanel', 'core.mfm',
+                              'panels', 'auth'],
     'default_icon_parents': 'fas fa-chevron-circle-right',
     'default_icon_children': 'fas fa-circle',
     'show_ui_builder': False,
+    # Jazzmin 3.0.2 ships Bootstrap 5 JS with Bootstrap 4 markup; this bridges
+    # the tabs and the user menu (see the file).
+    'custom_js': 'core/js/jazzmin_bs5_compat.js',
 }
 
 JAZZMIN_UI_TWEAKS = {

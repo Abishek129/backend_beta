@@ -17,6 +17,8 @@ import math
 from core.config_defaults import defaults_for
 from core.constants import FEEDER_ID_OFFSET
 from core.models import Group, MFM, NameplateBase
+from core.thresholds import OVERVIEW_DEFAULTS, PANEL_DEFAULTS
+from core.services import is_real
 
 # A meter with no per-meter override falls back to type defaults sized for a whole
 # panel, which flattens its own trace (R1). Derive the ratings from its own
@@ -68,7 +70,7 @@ _FRONTEND_KEYS = {
 # PQ limits the FE mapper expects that we don't store as model fields — emit IEEE
 # 519 LV defaults so per-meter limit lines render (FE falls back to these anyway).
 _PQ_LIMIT_DEFAULTS = {
-    'ieee_519_individual_harmonic_limit_pct': 6.0,
+    'ieee_519_individual_harmonic_limit_pct': 8.0,
     'flicker_pst_limit': 1.0,
     'crest_factor_ideal': 1.414,
 }
@@ -104,7 +106,10 @@ def resolve_panel_config(group):
     # PIN 2026-09-09: every panel_kind (distribution/pcc/ht) is distribution-class,
     # so they share one defaults table; panel_kind only drives the frame mfm_type.
     cfg_row = getattr(group, 'config', None) if group is not None else None
-    return _frontend_config(_overlay(defaults_for('distribution_panel'), cfg_row))
+    equipment = getattr(group, 'equipment', None) if group is not None else None
+    base = _overlay({**defaults_for('distribution_panel'), **PANEL_DEFAULTS},
+                    getattr(equipment, 'config', None))
+    return _frontend_config(_overlay(base, cfg_row))
 
 
 def resolve_mfm_config(mfm):
@@ -116,8 +121,32 @@ def resolve_mfm_config(mfm):
     at 1 dp (BE-62).
     """
     cfg_row = getattr(mfm, 'config', None) if mfm is not None else None
-    device_type = getattr(cfg_row, 'device_type', None) or 'lt_panel'
-    out = _overlay(defaults_for(device_type), cfg_row)
+    equipment = getattr(mfm, 'equipment', None) if mfm is not None else None
+    equipment_cfg = getattr(equipment, 'config', None) if equipment is not None else None
+    equipment_type = None
+    if equipment is not None:
+        equipment_type = (getattr(getattr(equipment, 'panel_type', None), 'code', None)
+                          or getattr(getattr(equipment, 'asset_type', None), 'code', None))
+    configured_type = getattr(cfg_row, 'device_type', None)
+    # The auto-created MfmConfig default is lt_panel; a more specific equipment
+    # type wins over that placeholder. A non-default MfmConfig remains explicit.
+    device_type = (configured_type if configured_type and configured_type != 'lt_panel'
+                   else equipment_type or configured_type or 'lt_panel')
+    out = _overlay(defaults_for(device_type), equipment_cfg)
+    out = _overlay(out, cfg_row)
+
+    # Direct MFM fields are the finest-grain nameplate overrides described by
+    # additional.md. They deliberately win over equipment and MfmConfig rows.
+    direct = {
+        'rated_kva': getattr(mfm, 'rated_capacity_kva', None),
+        'nominal_voltage_v': getattr(mfm, 'nominal_voltage_v', None),
+        'nameplate_voltage_kv': getattr(mfm, 'nameplate_voltage_kv', None),
+        'frequency_hz': getattr(mfm, 'frequency_hz', None),
+        'fault_level_ka': getattr(mfm, 'fault_level_ka', None),
+    }
+    for key, value in direct.items():
+        if value is not None:
+            out[key] = value
 
     # Derive from the meter's own kVA nameplate for every rating field the row
     # itself left null — same arithmetic as feeder_rating_overrides.
@@ -125,20 +154,70 @@ def resolve_mfm_config(mfm):
     if kva and float(kva) > 0:
         kva = float(kva)
         kw = round(kva * _FEEDER_PF)
-        rated_a = round(kva * 1000.0 / (math.sqrt(3) * _LV_LINE_V))
+        nominal_ll = float(out.get('nominal_voltage_v') or _LV_LINE_V)
+        rated_a = round(kva * 1000.0 / (math.sqrt(3) * nominal_ll))
         derived = {
             'rated_kw': kw,
             'rated_current_a': rated_a,
             'current_high_threshold_a': round(rated_a * 1.2),   # alarm at 120% of rated
         }
+        # Only an actual meter capacity supplies these per-meter targets;
+        # don't turn generic type defaults into a fictitious nameplate.
+        if getattr(mfm, 'rated_capacity_kva', None):
+            derived.update(contracted_kw=round(kw * .9), critical_load_kw=round(kw * .5),
+                           energy_target_kwh_today=round(kw * 24))
         for key, val in derived.items():
             if getattr(cfg_row, key, None) is None:
                 out[key] = val
 
+    out.update(OVERVIEW_DEFAULTS)
+    threshold = getattr(mfm, 'thresholds', None)
+    if threshold is not None:
+        threshold_map = {
+            'i_thd_limit_pct': 'thd_i_limit_pct',
+            'v_thd_limit_pct': 'thd_v_limit_pct',
+            'individual_harmonic_limit_pct': 'ieee_519_individual_harmonic_limit_pct',
+            'flicker_pst_limit': 'flicker_pst_limit',
+            'crest_factor_ideal': 'crest_factor_ideal',
+        }
+        for source, target in threshold_map.items():
+            value = getattr(threshold, source)
+            if value is not None:
+                out[target] = value
+        for field in threshold._meta.fields:
+            if field.name.startswith('overview_'):
+                value = getattr(threshold, field.name)
+                if value is not None:
+                    out[field.name] = value
+
+    breaker = getattr(mfm, 'breaker', None)
+    if breaker is not None:
+        out['breaker_type'] = breaker.breaker_type
+        out['breaker_rating_a'] = breaker.rating_a
+    out.update({
+        'series_id': getattr(mfm, 'series_id', '') or None,
+        'asset_category': getattr(mfm, 'asset_category', '') or None,
+        'load_profile': getattr(mfm, 'load_profile', '') or None,
+        'parent_series': getattr(mfm, 'parent_series', '') or None,
+    })
+    logger_schema = getattr(mfm, 'logger_schema', None)
+    out['logger_schema'] = ({
+        'id': logger_schema.id,
+        'code': logger_schema.code,
+        'version': logger_schema.version,
+        'name': logger_schema.name,
+        'timestamp_column': logger_schema.timestamp_column,
+        'active': logger_schema.active,
+    } if logger_schema is not None else None)
+
     # L-L -> L-N: the per-phase columns a meter screen plots are line-to-neutral.
     nom_ll = out.get('nominal_voltage_v')
+    out['nominal_voltage_ll_v'] = nom_ll
     if nom_ll:
         out['nominal_voltage_v'] = round(float(nom_ll) / math.sqrt(3), 1)
+    out['nominal_voltage_ln_v'] = out.get('nominal_voltage_v')
+    source = getattr(mfm, 'data_source', None) if mfm is not None else None
+    out['voltage_avg_basis'] = 'L-L' if source is not None and is_real(source.dsn) else 'L-N'
     return _frontend_config(out)
 
 
@@ -151,14 +230,16 @@ def resolve_for_id(eid):
     """
     if eid < FEEDER_ID_OFFSET:
         g = (Group.objects.filter(id=eid, active=True, is_panel=True)
-             .select_related('config').first())
+             .select_related('config', 'equipment__config').first())
         if g is None:
             return None, None, None
         kind = getattr(getattr(g, 'config', None), 'panel_kind', None) or 'distribution_panel'
         return g, kind, resolve_panel_config(g)
 
     m = (MFM.objects.filter(id=eid - FEEDER_ID_OFFSET, active=True)
-         .select_related('config').first())
+         .select_related('config', 'data_source', 'equipment__panel_type', 'equipment__asset_type',
+                         'equipment__config', 'thresholds', 'breaker',
+                         'logger_schema').first())
     if m is None:
         return None, None, None
     device_type = getattr(getattr(m, 'config', None), 'device_type', None)

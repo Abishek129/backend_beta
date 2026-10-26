@@ -8,7 +8,8 @@ from django.core.exceptions import ValidationError
 
 from core.config import resolve_for_id, resolve_mfm_config, resolve_panel_config
 from core.constants import FEEDER_ID_OFFSET
-from core.models import Group, Membership, MfmConfig, MFM, PanelConfig
+from core.models import (Breaker, Equipment, EquipmentConfig, Group, Membership,
+                         MfmConfig, MFM, MfmThreshold, PanelConfig, PanelType)
 
 
 class ConfigResolutionTests(TestCase):
@@ -19,6 +20,17 @@ class ConfigResolutionTests(TestCase):
             logger_id='dev_01', name='MFM-01', slug='mfm-01')
 
     # --- panels: nominal stays line-to-line ---------------------------------
+    def test_explicit_daily_target_wins_over_capacity_derivation(self):
+        self.mfm.rated_capacity_kva = 3200
+        self.mfm.save()
+        cfg = MfmConfig.objects.create(mfm=self.mfm, energy_target_kwh_today=25000)
+        self.assertEqual(resolve_mfm_config(MFM.objects.get(pk=self.mfm.pk))[
+            'energy_target_kwh_today'], 25000)
+        cfg.energy_target_kwh_today = 0
+        cfg.save()
+        self.assertEqual(resolve_mfm_config(MFM.objects.get(pk=self.mfm.pk))[
+            'energy_target_kwh_today'], 0)
+
     def test_panel_nominal_is_line_to_line_by_default(self):
         cfg = resolve_panel_config(self.panel)
         self.assertEqual(cfg['nominal_voltage_v'], 415.0)
@@ -61,9 +73,35 @@ class ConfigResolutionTests(TestCase):
             self.assertIn('ieee_519_voltage_thd_limit_pct', cfg)
             self.assertIn('ieee_519_current_thd_limit_pct', cfg)
             self.assertIn('ieee_519_individual_harmonic_limit_pct', cfg)
-            self.assertEqual(cfg['ieee_519_individual_harmonic_limit_pct'], 6.0)
+            self.assertEqual(cfg['ieee_519_individual_harmonic_limit_pct'], 8.0)
             self.assertEqual(cfg['flicker_pst_limit'], 1.0)
             self.assertEqual(cfg['crest_factor_ideal'], 1.414)
+
+    def test_equipment_then_mfm_then_direct_override_precedence(self):
+        kind = PanelType.objects.get(code='lt_panel')
+        equipment = Equipment.objects.create(
+            key='load-a', name='Load A', panel_type=kind, metered=True)
+        EquipmentConfig.objects.create(
+            equipment=equipment, rated_kva=900, nominal_voltage_v=400)
+        MfmConfig.objects.create(
+            mfm=self.mfm, rated_kva=1000, nominal_voltage_v=415)
+        MFM.objects.filter(pk=self.mfm.pk).update(
+            equipment=equipment, rated_capacity_kva=1100, nominal_voltage_v=440)
+        cfg = resolve_mfm_config(MFM.objects.get(pk=self.mfm.pk))
+        self.assertEqual(cfg['rated_kva'], 1100)
+        self.assertEqual(cfg['voltage_nominal_v'], round(440 / math.sqrt(3), 1))
+
+    def test_threshold_and_breaker_metadata_are_exposed(self):
+        MfmThreshold.objects.create(
+            mfm=self.mfm, i_thd_limit_pct=9, v_thd_limit_pct=7,
+            individual_harmonic_limit_pct=4, overview_pf_good=.97)
+        Breaker.objects.create(mfm=self.mfm, breaker_type='VCB', rating_a=1250)
+        cfg = resolve_mfm_config(MFM.objects.get(pk=self.mfm.pk))
+        self.assertEqual(cfg['ieee_519_current_thd_limit_pct'], 9)
+        self.assertEqual(cfg['ieee_519_voltage_thd_limit_pct'], 7)
+        self.assertEqual(cfg['ieee_519_individual_harmonic_limit_pct'], 4)
+        self.assertEqual(cfg['overview_pf_good'], .97)
+        self.assertEqual((cfg['breaker_type'], cfg['breaker_rating_a']), ('VCB', 1250))
 
 
 class ResolveForIdTests(TestCase):

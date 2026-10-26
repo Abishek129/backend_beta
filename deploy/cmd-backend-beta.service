@@ -1,19 +1,19 @@
 [Unit]
-Description=CMD backend_beta (Django + Channels, daphne :8891)
-After=network.target loggerfast-backend.service
+Description=EMS backend (Django + Channels, Daphne :18889)
+After=network.target
 
 [Service]
 Type=simple
-WorkingDirectory=/home/rohith/CMD/backend_beta
+WorkingDirectory=/home/rohithdev/EMSbackend
 Environment=DJANGO_SETTINGS_MODULE=config.settings
-EnvironmentFile=-/home/rohith/CMD/backend_beta/.env
-ExecStart=/home/rohith/.pyenv/versions/3.11.9/bin/daphne -b 0.0.0.0 -p 8891 config.asgi:application
+ExecStart=/home/rohithdev/EMSbackend/.venv/bin/daphne -b 0.0.0.0 -p 18889 config.asgi:application
 Restart=always
 RestartSec=3
-# journal, not a file — backend2's daphne.log grew to 1.8 GB.
+# Django loads /home/rohithdev/EMSbackend/.env itself (see config/settings.py).
+# Keep logs in the journal, not an unbounded file.
 StandardOutput=journal
 StandardError=journal
-SyslogIdentifier=cmd-backend-beta
+SyslogIdentifier=emsbackend
 
 [Install]
 WantedBy=default.target

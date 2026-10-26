@@ -7,7 +7,7 @@ of any size (a 900 kW incomer and a 380 kW UPS feeder both band on % of rated).
 unbalance); ``'desc'`` → higher value = better (Power Factor). ``absval`` bands
 on |value| (voltage deviation can be ±).
 
-Resolution order for the 4 boundaries: per-equipment RtmThreshold → per-panel_type
+Resolution order for the 4 boundaries: per-Group RtmThreshold → per-panel_type
 RtmThreshold → DEFAULT_BANDS here.
 """
 

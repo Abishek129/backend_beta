@@ -168,7 +168,8 @@ class NavTreeTests(TestCase):
     # --- panel / leaf shapes (unchanged from the arbitrary-depth tree) --------
     def test_panel_node_shape(self):
         mcc1 = self._panel('mcc-1')
-        self.assertEqual(mcc1['id'], 'grp-grp_mcc1')
+        self.assertEqual(mcc1['id'], f'grp-{self.mcc1.id}')      # Group.id, not logger_id
+        self.assertEqual(mcc1['logger_id'], 'grp_mcc1')
         self.assertEqual(mcc1['key'], 'mcc-1')
         self.assertEqual(mcc1['kind'], 'panel')
         self.assertTrue(mcc1['distribution_panel'])
@@ -183,10 +184,10 @@ class NavTreeTests(TestCase):
         self.assertEqual([n['slug'] for n in mcc1['children']],
                          ['overview', 'incoming', 'outgoing'])   # no Spare group
         overview = mcc1['children'][0]
-        self.assertEqual(overview, {'id': 'grp-grp_mcc1-overview',
+        self.assertEqual(overview, {'id': f'grp-{self.mcc1.id}-overview',
                                     'label': 'Overview', 'slug': 'overview'})
         group_node = _by_slug(mcc1['children'], 'outgoing')
-        self.assertEqual(group_node['id'], 'grp-grp_mcc1-outgoing')
+        self.assertEqual(group_node['id'], f'grp-{self.mcc1.id}-outgoing')
         self.assertEqual(group_node['label'], 'Outgoing')
         self.assertTrue(group_node['group'])
         self.assertTrue(group_node['alwaysOpen'])
@@ -202,7 +203,7 @@ class NavTreeTests(TestCase):
         self.assertLess(self._panel('mcc-1')['mfm_id'], FEEDER_ID_OFFSET)
         leaf = self._leaf('mcc-1', 'incoming', 'MFM-01')
         self.assertEqual(leaf['mfm_id'], FEEDER_ID_OFFSET + self.mfm[1].id)
-        self.assertEqual(leaf['id'], f"grp-grp_mcc1-mfm-{FEEDER_ID_OFFSET + self.mfm[1].id}")
+        self.assertEqual(leaf['id'], f"grp-{self.mcc1.id}-mfm-{FEEDER_ID_OFFSET + self.mfm[1].id}")
 
     def test_member_leaf_shape(self):
         leaf = self._leaf('mcc-1', 'incoming', 'MFM-01')

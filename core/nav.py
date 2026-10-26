@@ -6,7 +6,8 @@
 
 Intermediate non-panel Groups no longer render. They keep two jobs: they own
 memberships (their meters become loose leaves) and they carry ``nav_category``
-for their whole subtree.
+for their whole subtree. A meter in no group at all becomes a loose leaf only
+when a human filed it under a category (see ``_STANDALONE``).
 
 There is NO per-category mode — backend2's ``mode: hierarchical|flat`` is gone.
 Whether a node expands is derived per node from ``Group.is_panel``, so a
@@ -16,6 +17,8 @@ Two orthogonal axes place a panel (see core.nav_categories):
 ``PanelConfig.panel_kind`` -> HT/AMF/PCC/UPS, ``nav_category`` -> the rest.
 Node shapes reuse the keys CMD_V2 already reads; see ``NAV_CONTRACT.md``.
 """
+from django.db.models import Q
+
 from core.config import resolve_panel_config
 from core.config_defaults import defaults_for
 from core.constants import FEEDER_ID_OFFSET
@@ -26,6 +29,11 @@ from core.nav_categories import NAV_CATEGORIES, PANEL_KIND_CATEGORY
 _MODULE = '/electrical'
 # Role groups, in display order; empty ones are omitted.
 _ROLES = [('incoming', 'Incoming'), ('outgoing', 'Outgoing'), ('spare', 'Spare')]
+# A meter in NO group, filed straight under a category by hand. 'manual' is the
+# point: the admin pins every category it writes, while an imported ungrouped
+# device carries only the importer's name GUESS ('auto') and stays out.
+_HAND_FILED = Q(nav_category_source='manual') & ~Q(nav_category='')
+_STANDALONE = Q(active=True, memberships__isnull=True) & _HAND_FILED
 
 
 def _kv(volts):
@@ -60,6 +68,19 @@ def _group_category(group):
         if cid:
             return cid
     return group.nav_category or None
+
+
+def resolved_category(group):
+    """One group's category — own value, else the nearest ancestor's — for the
+    admin forms. ``build_tree`` uses the batched ``_category_index`` instead."""
+    seen = set()
+    while group is not None and group.pk not in seen:
+        seen.add(group.pk)
+        cid = _group_category(group)
+        if cid:
+            return cid
+        group = group.parent
+    return None
 
 
 def _category_index(groups):
@@ -114,8 +135,8 @@ def _member_leaf(panel_id, membership, stats):
         'key': mfm.slug,
         'role': membership.role,
         'logger_device_id': mfm.logger_id,
-        'mfm_row': None,
-        'breaker_type': None,
+        'mfm_row': mfm.sheet_row,
+        'breaker_type': getattr(getattr(mfm, 'breaker', None), 'breaker_type', None),
         'nominal_kv': _mfm_nominal_kv(mfm),
         'distribution_panel': False,
     }
@@ -143,6 +164,8 @@ def _loose_leaf(mfm, category, stats):
         'mfm_name': mfm.name,
         'mfm_ids': [eid],
         'logger_device_id': mfm.logger_id,
+        'mfm_row': mfm.sheet_row,
+        'breaker_type': getattr(getattr(mfm, 'breaker', None), 'breaker_type', None),
         'category': category,
     }
 
@@ -168,7 +191,9 @@ def _parent_label(group, by_id):
 
 
 def _panel_node(group, memberships, category, by_id, stats):
-    panel_id = f'grp-{group.logger_id}'
+    # Keyed on Group.id, not logger_id: a panel built in the admin has no
+    # logger id, and Group.id is already the stable id the screens address.
+    panel_id = f'grp-{group.id}'
     by_role = {}
     for m in memberships:
         by_role.setdefault(m.role, []).append(m)
@@ -209,6 +234,12 @@ def _panel_node(group, memberships, category, by_id, stats):
     return node
 
 
+def ungrouped_mfms():
+    """Active meters the nav cannot place: in no group and not filed by hand."""
+    return (MFM.objects.filter(active=True, memberships__isnull=True)
+            .exclude(_HAND_FILED))
+
+
 def _category_node(cid, label, slug, index, children):
     return {
         'id': f'eq-{cid}',
@@ -226,14 +257,14 @@ def _category_node(cid, label, slug, index, children):
 def build_tree():
     """``{count, leaf_count, matched_mfm_count, ungrouped_mfm_count,
     uncategorised_panel_count, uncategorised_mfm_count, tree}``."""
-    # PIN 2026-09-09: query budget = 4 flat queries regardless of plant size
-    # (groups+config, twins prefetch, memberships+mfm+config, ungrouped count);
-    # the tree is bucketed in Python, never per node.
+    # PIN 2026-09-09: query budget = 5 flat queries regardless of plant size
+    # (groups+config, twins prefetch, memberships+mfm+config, standalone
+    # meters, ungrouped count); the tree is bucketed in Python, never per node.
     #
     # NOTE the deliberate absence of .filter(active=True): _category_index needs
     # retired ancestors. Only ACTIVE groups are ever emitted.
     groups = list(Group.objects
-                  .select_related('config')
+                  .select_related('config', 'equipment__config')
                   .prefetch_related('twins')
                   .order_by('sort_order', 'name', 'id'))
     by_id = {g.id: g for g in groups}
@@ -242,7 +273,7 @@ def build_tree():
     members_by_group, claimed = {}, set()
     for m in (Membership.objects
               .filter(group__active=True, mfm__active=True)
-              .select_related('mfm', 'mfm__config')
+              .select_related('mfm', 'mfm__config', 'mfm__breaker')
               .order_by('position', 'id')):
         members_by_group.setdefault(m.group_id, []).append(m)
         g = by_id.get(m.group_id)
@@ -283,9 +314,18 @@ def build_tree():
             continue
         buckets[cid].append(_loose_leaf(mfm, cid, stats))
 
+    # --- standalone meters: in no group, filed under a category by hand -----
+    # No membership means no panel claims them and no plain group emitted them.
+    for mfm in (MFM.objects.filter(_STANDALONE)
+                .select_related('config', 'breaker').order_by('name', 'id')):
+        if mfm.nav_category not in buckets:          # a stale code; never guess
+            stats['uncat_mfms'] += 1
+            continue
+        buckets[mfm.nav_category].append(_loose_leaf(mfm, mfm.nav_category, stats))
+
     tree = [_category_node(cid, label, slug, i, buckets[cid])
             for i, (cid, label, slug) in enumerate(NAV_CATEGORIES)]
-    ungrouped = MFM.objects.filter(active=True, memberships__isnull=True).count()
+    ungrouped = ungrouped_mfms().count()
     return {
         'count': len(tree),
         'leaf_count': stats['leaves'],

@@ -4,11 +4,13 @@ Routes are GENERATED from ``panels.registry.SCREENS``: one ``type_dispatch``
 route per registered screen, then the catch-all. Import the consumer modules
 here (their import side effect calls ``screen(...)``) to add routes.
 
-PIN 2026-09-09: no consumer modules imported yet — the list is the catch-all only,
-so every ``ws/mfm/...`` connect answers with a 4404 error frame.
+Single-MFM consumers are imported first, then aggregate panel consumers add the
+distribution-panel slot without replacing the two single-MFM slots.
 """
 from django.urls import path
 
+from panels.consumers import single  # noqa: F401,E402 - registers screens
+from panels.consumers import distribution  # noqa: F401,E402 - extends shared screens
 from panels.dispatch import reject_invalid_id, type_dispatch
 from panels.registry import SCREENS
 

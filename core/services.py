@@ -19,6 +19,7 @@ _IDENT = re.compile(r'^[a-zA-Z_][a-zA-Z0-9_]*$')
 _pools = {}
 _colcache = {}
 _boolcache = {}
+_textcolcache = {}
 _timetypecache = {}
 _TEXT_TYPES = {'character varying', 'text', 'character', 'char', 'bpchar'}
 _lock = threading.Lock()
@@ -96,6 +97,26 @@ def _bool_cols(conn, dsn, table):
     return cols
 
 
+def _text_cols(conn, dsn, table):
+    """Columns stored as text even when LoggerFast metadata declares numeric.
+
+    Some generated/derived ``gic_*`` fields use varchar storage. Aggregations
+    must cast those values after treating blank strings as NULL.
+    """
+    key = (dsn, table)
+    cols = _textcolcache.get(key)
+    if cols is None:
+        with conn.cursor() as cur:
+            cur.execute(
+                "SELECT column_name FROM information_schema.columns "
+                "WHERE table_name=%s AND data_type = ANY(%s) "
+                "AND table_schema = ANY(current_schemas(false))",
+                (table, list(_TEXT_TYPES)))
+            cols = {row[0] for row in cur.fetchall()}
+        _textcolcache[key] = cols
+    return cols
+
+
 def _time_is_text(conn, dsn, table, time_col):
     """True when the time column is stored as TEXT (ISO-8601 string) rather than
     a native timestamp/timestamptz — some loggers store ``timestamp_utc`` as
@@ -169,7 +190,13 @@ def _tcol(conn, dsn, table, time_col):
 #   candidate = str                    → a direct rename (used if that column exists)
 #   candidate = ('mean'|'max', [cols]) → per-phase aggregate (all cols must exist)
 _SCHEMA_ALIAS = {
-    'apparent_energy_kvah': ['apparent_energy_delivered_kvah', 'apparent_energy_import_kvah'],
+    # LoggerFast schema spellings are case-sensitive in PostgreSQL. EMMS7-96
+    # and LG2599 retain the vendor's kWh/kVArh/kVAh capitalization, while the
+    # public MFM contract deliberately stays lowercase and logger-agnostic.
+    'active_energy_import_kwh': ['active_energy_import_kWh'],
+    'reactive_energy_import_kvarh': ['reactive_energy_import_kVArh'],
+    'apparent_energy_kvah': ['apparent_energy_delivered_kvah',
+                             'apparent_energy_import_kvah', 'apparent_energy_kVAh'],
     'k_factor':             [('mean', ['k_factor_a', 'k_factor_b', 'k_factor_c'])],
     'crest_factor_voltage': [('mean', ['crest_factor_a', 'crest_factor_b', 'crest_factor_c'])],
 
@@ -496,8 +523,13 @@ def _energy_delta_sql(col, have, dirscale=('sum', 1.0, 1.0)):
     # export column on an import-only meter) never poisons the sum/net to NULL —
     # which previously zeroed a feeder's whole energy while its import counter
     # was climbing (HT-01 APFCR read 0 kWh on the 'sum' path).
-    d_imp = f'COALESCE(max("{imp}") - min("{imp}"), 0)' if imp in have else None
-    d_exp = f'COALESCE(max("{exp}") - min("{exp}"), 0)' if exp in have else None
+    # Prefer exact canonical names; otherwise resolve the known LoggerFast
+    # spelling (e.g. kWh/kVArh). PostgreSQL quoted identifiers are case-sensitive.
+    # The real-logger correction runs before _metric_sql's general alias path.
+    imp_ref = f'"{imp}"' if imp in have else _alias_expr(have, imp)
+    exp_ref = f'"{exp}"' if exp in have else _alias_expr(have, exp)
+    d_imp = f'COALESCE(max({imp_ref}) - min({imp_ref}), 0)' if imp_ref else None
+    d_exp = f'COALESCE(max({exp_ref}) - min({exp_ref}), 0)' if exp_ref else None
     if direction == 'import':
         expr = d_imp or '0'
     elif direction == 'export':
@@ -517,7 +549,8 @@ def _energy_delta_sql(col, have, dirscale=('sum', 1.0, 1.0)):
     return f'({expr} * {scale})' if scale != 1.0 else expr
 
 
-def _metric_sql(dsn, func, col, have, dirscale=('sum', 1.0, 1.0), bools=(), tcol=None):
+def _metric_sql(dsn, func, col, have, dirscale=('sum', 1.0, 1.0), bools=(),
+                texts=(), tcol=None):
     """SQL for ``func(col)`` with the real-logger profile applied (§2): energy
     'delta' resolves the import/export pair per the meter's energy direction
     and decade scale; magnitude power is abs'd and × power_scale. Falls back to
@@ -536,7 +569,8 @@ def _metric_sql(dsn, func, col, have, dirscale=('sum', 1.0, 1.0), bools=(), tcol
             # avg/min/max: null the no-data sentinels BEFORE scale so a dead
             # register's 6553.5/13107 samples can't pollute the bucket.
             # BE-114: SIGNED power (no abs) — keep only the decade power_scale.
-            base = _power_scrub(col) if func in ('avg', 'min', 'max') else f'"{col}"'
+            base = (_power_scrub(col, col in texts) if func in ('avg', 'min', 'max')
+                    else _numeric_ref(col, col in texts))
             ref = base if pscale == 1.0 else f'({base} * {pscale})'
             return f'(max({ref}) - min({ref}))' if func == 'delta' else f'{func}({ref})'
     # schema-alias: a canonical column absent from THIS table (e.g. the BMS
@@ -547,7 +581,7 @@ def _metric_sql(dsn, func, col, have, dirscale=('sum', 1.0, 1.0), bools=(), tcol
         expr = _alias_expr(have, col)
         if expr is not None:
             return f'(max({expr}) - min({expr}))' if func == 'delta' else f'{func}({expr})'
-    return _agg_expr(func, col, col in bools)
+    return _agg_expr(func, col, col in bools, col in texts)
 
 
 def _power_ref(dsn, col, table=None):
@@ -612,16 +646,21 @@ NO_DATA_SENTINELS = (65535.0, 6553.5, 655.35, 32767.0, 3276.7, 1802.6111,
 NO_DATA_SENTINEL_BIG = 4.2949674e+08
 
 
-def _sentinel_free(col):
+def _numeric_ref(col, is_text=False):
+    return f'NULLIF("{col}", \'\')::double precision' if is_text else f'"{col}"'
+
+
+def _sentinel_free(col, is_text=False):
     """CASE-wrap ``"col"`` so no-data sentinel samples aggregate as NULL —
     avg/min/max skip NULLs, so one 0x7FFF sample can no longer pollute a bucket
     (e.g. the Jul-20 wind-temp 3276.7 inflating that day's avg + derived FAA).
     A no-op for real readings: only the narrow sentinel bands are nulled."""
-    conds = ' OR '.join(f'"{col}" BETWEEN {s - 0.05:.4f} AND {s + 0.05:.4f}'
+    ref = _numeric_ref(col, is_text)
+    conds = ' OR '.join(f'{ref} BETWEEN {s - 0.05:.4f} AND {s + 0.05:.4f}'
                         for s in NO_DATA_SENTINELS)
     big = NO_DATA_SENTINEL_BIG
-    conds += f' OR "{col}" BETWEEN {big - 512.0:.1f} AND {big + 512.0:.1f}'
-    return f'(CASE WHEN {conds} THEN NULL ELSE "{col}" END)'
+    conds += f' OR {ref} BETWEEN {big - 512.0:.1f} AND {big + 512.0:.1f}'
+    return f'(CASE WHEN {conds} THEN NULL ELSE {ref} END)'
 
 
 # A single meter's raw kW/kVA/kVAr magnitude ceiling. The plant's largest unit is
@@ -632,11 +671,12 @@ def _sentinel_free(col):
 _POWER_MAGNITUDE_MAX = 1.0e6
 
 
-def _power_scrub(col):
+def _power_scrub(col, is_text=False):
     """``_sentinel_free`` + the physical-impossibility ceiling above, so a corrupt
     power spike is NULLed before it pollutes an avg/min/max bucket."""
-    return (f'(CASE WHEN abs("{col}") > {_POWER_MAGNITUDE_MAX:.1f} '
-            f'THEN NULL ELSE {_sentinel_free(col)} END)')
+    ref = _numeric_ref(col, is_text)
+    return (f'(CASE WHEN abs({ref}) > {_POWER_MAGNITUDE_MAX:.1f} '
+            f'THEN NULL ELSE {_sentinel_free(col, is_text)} END)')
 
 
 # ── UINT32 lifetime counters (BMS air-compressor / air-dryer service registers) ─
@@ -668,7 +708,7 @@ def _counter_delta_sql(ref, tc):
     return f'(CASE WHEN {d} < 0 THEN NULL ELSE {d} END)'
 
 
-def _agg_expr(func, col, is_bool=False):
+def _agg_expr(func, col, is_bool=False, is_text=False):
     # A BOOLEAN column cannot be averaged/summed in Postgres. The BMS VFD blocks
     # (e.g. `general_air_exhaust_unit.vfd_N_on_fb`) are genuine booleans, and
     # avg()/sum() over them is exactly what a "how many blowers were on this
@@ -679,11 +719,12 @@ def _agg_expr(func, col, is_bool=False):
         if func == 'delta':
             return f'max({ref}) - min({ref})'
         return f'{func}({ref})'
+    ref = _numeric_ref(col, is_text)
     if func == 'delta':                       # counter delta over the window
-        return f'max("{col}") - min("{col}")'
+        return f'max({ref}) - min({ref})'
     if func in ('avg', 'min', 'max'):         # sentinels must not pollute buckets
-        return f'{func}({_sentinel_free(col)})'
-    return f'{func}("{col}")'
+        return f'{func}({_sentinel_free(col, is_text)})'
+    return f'{func}({ref})'
 
 
 def fetch_bucketed(dsn, table, start, end, bucket, metrics, time_col='timestamp'):
@@ -701,6 +742,7 @@ def fetch_bucketed(dsn, table, start, end, bucket, metrics, time_col='timestamp'
     try:
         have = _columns(conn, dsn, table)
         bools = _bool_cols(conn, dsn, table)
+        texts = _text_cols(conn, dsn, table)
         time_col, tc, wc, bnd = _tcol(conn, dsn, table, time_col)
         direction = _energy_direction(dsn, table)
         sel = []
@@ -711,7 +753,7 @@ def fetch_bucketed(dsn, table, start, end, bucket, metrics, time_col='timestamp'
             # builds the aliased expression); anything else is genuinely absent
             # and is simply omitted, leaving the FE a null series.
             if col in have or _alias_expr(have, col) is not None:
-                sel.append(f'{_metric_sql(dsn, func, col, have, direction, bools, tc)} AS "{alias}"')
+                sel.append(f'{_metric_sql(dsn, func, col, have, direction, bools, texts, tc)} AS "{alias}"')
         if not sel:
             return []
         if bucket:
@@ -774,6 +816,7 @@ def fetch_event_counts(dsn, table, start, end, bucket, flags, time_col='timestam
     try:
         have = _columns(conn, dsn, table)
         boolset = _bool_cols(conn, dsn, table)
+        textset = _text_cols(conn, dsn, table)
         time_col, tc, wc, bnd = _tcol(conn, dsn, table, time_col)
         flags = [f for f in flags if f in have]
         if not flags:
@@ -782,10 +825,17 @@ def fetch_event_counts(dsn, table, start, end, bucket, flags, time_col='timestam
         # Real loggers type *_event_active as real (0.0/1.0), not boolean, so
         # `"f" AND ...` errors. Coerce non-boolean flags to truthy (`f <> 0`).
         def _now(f):
-            return f'"{f}"' if f in boolset else f'("{f}" <> 0)'
+            if f in boolset:
+                return f'"{f}"'
+            ref = _numeric_ref(f, f in textset)
+            return f'({ref} <> 0)'
 
         def _prev(f):
-            return f'coalesce(prev_{f}, false)' if f in boolset else f'(coalesce(prev_{f}, 0) <> 0)'
+            if f in boolset:
+                return f'coalesce(prev_{f}, false)'
+            ref = (f"NULLIF(prev_{f}, '')::double precision"
+                   if f in textset else f'prev_{f}')
+            return f'(coalesce({ref}, 0) <> 0)'
 
         lags = ', '.join(f'lag("{f}") OVER (ORDER BY {wc}) AS prev_{f}' for f in flags)
         cnts = ', '.join(f'count(*) FILTER (WHERE {_now(f)} AND NOT {_prev(f)}) AS "{f}"' for f in flags)
@@ -825,6 +875,7 @@ def fetch_threshold_events(dsn, table, start, end, bucket, specs, time_col='time
     conn = p.getconn()
     try:
         have = _columns(conn, dsn, table)
+        texts = _text_cols(conn, dsn, table)
         time_col, tc, wc, bnd = _tcol(conn, dsn, table, time_col)
         valid = {}
         for alias, (col, direction, thr) in specs.items():
@@ -841,7 +892,9 @@ def fetch_threshold_events(dsn, table, start, end, bucket, specs, time_col='time
         # scored stopsToday=1 with zero real transitions). Seed the lag with the
         # last sample BEFORE ``start``: it participates in lag() ordering only,
         # then the outer ``NOT _seed`` filter trims it so it is never counted.
-        lags = ', '.join(f'lag("{c}") OVER (ORDER BY "{time_col}") AS prev_{c}' for c in cols)
+        refs = {c: _numeric_ref(c, c in texts) for c in cols}
+        lags = ', '.join(
+            f'lag("{c}") OVER (ORDER BY "{time_col}") AS prev_{c}' for c in cols)
         cnts = []
         for alias, (col, direction, thr) in valid.items():
             if direction == 'below':
@@ -851,14 +904,15 @@ def fetch_threshold_events(dsn, table, start, end, bucket, specs, time_col='time
                 cnts.append(f'count(*) FILTER (WHERE "{col}" > {thr} AND '
                             f'(prev_{col} IS NULL OR prev_{col} <= {thr})) AS "{alias}"')
         selcols = ', '.join(f'"{c}"' for c in cols)
+        sourcecols = ', '.join(f'{refs[c]} AS "{c}"' for c in cols)
         bexpr = (f"date_trunc('{bucket}', ({time_col} AT TIME ZONE '{IST}'))" if bucket else 'NULL::timestamp')
         grp = 'GROUP BY bucket ORDER BY bucket' if bucket else ''
         sql = (f'SELECT {bexpr} AS bucket, {", ".join(cnts)} FROM '
                f'(SELECT "{time_col}", {selcols}, _seed, {lags} FROM '
-               f'((SELECT {tc} AS "{time_col}", {selcols}, false AS _seed FROM "{table}" '
+               f'((SELECT {tc} AS "{time_col}", {sourcecols}, false AS _seed FROM "{table}" '
                f'WHERE {wc} >= %s AND {wc} < %s) '
                f'UNION ALL '
-               f'(SELECT {tc} AS "{time_col}", {selcols}, true AS _seed FROM "{table}" '
+               f'(SELECT {tc} AS "{time_col}", {sourcecols}, true AS _seed FROM "{table}" '
                f'WHERE {wc} < %s ORDER BY {wc} DESC LIMIT 1)) w) s '
                f'WHERE NOT _seed {grp}')
         with conn.cursor(cursor_factory=RealDictCursor) as cur:
@@ -985,6 +1039,7 @@ def fetch_sampled(dsn, table, start, end, sampling, metrics, time_col='timestamp
     try:
         have = _columns(conn, dsn, table)
         bools = _bool_cols(conn, dsn, table)
+        texts = _text_cols(conn, dsn, table)
         time_col, tc, wc, bnd = _tcol(conn, dsn, table, time_col)
         direction = _energy_direction(dsn, table)
         sel = []
@@ -995,7 +1050,7 @@ def fetch_sampled(dsn, table, start, end, sampling, metrics, time_col='timestamp
             # builds the aliased expression); anything else is genuinely absent
             # and is simply omitted, leaving the FE a null series.
             if col in have or _alias_expr(have, col) is not None:
-                sel.append(f'{_metric_sql(dsn, func, col, have, direction, bools, tc)} AS "{alias}"')
+                sel.append(f'{_metric_sql(dsn, func, col, have, direction, bools, texts, tc)} AS "{alias}"')
         if not sel:
             return []
         bexpr = _sampling_expr(sampling, tc)

@@ -1,0 +1,58 @@
+{% extends "admin/base_site.html" %}
+
+{% block breadcrumbs %}
+<div class="breadcrumbs">
+  <a href="{% url 'admin:index' %}">Home</a> ›
+  <a href="{{ back_url }}">MFMs</a> › Import workbook
+</div>
+{% endblock %}
+
+{% block content %}
+<p>Upload a sheet like <code>ems_import_template.xlsx</code>. The <em>Table name</em> column may
+contain a LoggerFast device label or its physical table name. For ambiguous names, add a
+<code>Logger device ID</code> or <code>Physical table</code> column. Existing panels and MFMs are
+updated; missing ones are created. This upload never deletes omitted rows.</p>
+<p>UPS and Utility rows without a panel name are placed in <strong>UPS</strong> and
+<strong>Utility Panel</strong> respectively. Production rows must be standalone.
+Preview rolls back all changes.</p>
+
+<form method="post" enctype="multipart/form-data">
+  {% csrf_token %}
+  {{ form.as_p }}
+  <div class="submit-row">
+    <button type="submit" name="action" value="preview" class="button">Preview</button>
+    <button type="submit" name="action" value="commit" class="button default">Commit upload</button>
+  </div>
+</form>
+
+{% if report %}
+  <h2>{% if report.ok %}{% if report.committed %}Import committed{% else %}Preview only — no changes saved{% endif %}{% else %}Import rejected — no changes saved{% endif %}</h2>
+  {% if report.errors %}
+    <ul class="errorlist">
+      {% for error in report.errors %}<li>{{ error.sheet }} row {{ error.row }}: {{ error.message }}</li>{% endfor %}
+    </ul>
+  {% endif %}
+  {% if report.warnings %}
+    <h3>Warnings</h3>
+    <ul>{% for warning in report.warnings %}<li>{{ warning.sheet }} row {{ warning.row }}: {{ warning.message }}</li>{% endfor %}</ul>
+  {% endif %}
+  {% if report.summary %}
+    <h3>Summary</h3>
+    <ul>
+    {% for entity, actions in report.summary.items %}
+      <li>{{ entity }}: {% for action, count in actions.items %}{{ action }} {{ count }}{% if not forloop.last %}, {% endif %}{% endfor %}</li>
+    {% endfor %}
+    </ul>
+  {% endif %}
+  {% if report.changes %}
+    <h3>Changes</h3>
+    <table>
+      <thead><tr><th>Sheet / row</th><th>Entity</th><th>Action</th><th>Name</th><th>Detail</th></tr></thead>
+      <tbody>{% for change in report.changes %}
+      <tr><td>{{ change.sheet }} {{ change.row }}</td><td>{{ change.entity }}</td>
+          <td>{{ change.action }}</td><td>{{ change.name }}</td><td>{{ change.detail }}</td></tr>
+      {% endfor %}</tbody>
+    </table>
+  {% endif %}
+{% endif %}
+{% endblock %}
