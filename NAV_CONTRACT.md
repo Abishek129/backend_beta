@@ -22,7 +22,7 @@ The tree the FE receives is **exactly two container levels deep**, regardless of
 the logger nests its groups:
 
 ```
-category  (one of eight, fixed order, always emitted)
+category  (one of eight, fixed order; empty APFC/HVAC omitted)
   ├── panel      -> Overview + Incoming/Outgoing/Spare -> member leaves
   └── loose leaf
 ```
@@ -318,7 +318,7 @@ never raises.
 |---|---|---|
 | source | hardcoded `core/ems_tree.py` SECTIONS | **DB state** (`panel_kind` / `nav_category`), seeded from the name by the importer, corrected in the admin |
 | depth | exactly 2 (7 fixed sections → panels) | exactly 2 (8 fixed categories → panels / loose leaves) |
-| sections | 7, curated, shown only if listed | 8, fixed, **always emitted even when empty** |
+| sections | 7, curated, shown only if listed | 8 supported; **empty APFC/HVAC omitted**, other sections retained |
 | expansion | per-section `mode: hierarchical\|flat` | **no mode** — derived per node from `Group.is_panel` |
 | envelope | `count, leaf_count, matched_mfm_count, tree` | **+ `ungrouped_mfm_count`, `uncategorised_panel_count`, `uncategorised_mfm_count`** |
 | `leaf_count` | every childless node (Overview nodes included) | metered leaves only |
@@ -339,9 +339,10 @@ never raises.
 
 ### FE work implied
 
-1. **Exactly two container levels and a known eight-category list.** Render all eight in the
-   order given, **including the ones whose `children` is `[]`** — an empty category is a real
-   state, not a bug.
+1. **Exactly two container levels and a known eight-category list.** Render the sections
+   returned by the API in their given order. Empty APFC and HVAC sections are omitted;
+   do not recreate them client-side. Other sections may have empty `children` arrays.
+   APFC/HVAC reappear if they contain an active panel or standalone meter.
 2. Key nodes by `id`, not by `mfm_id` (`mfm_id` is no longer unique across the tree).
 3. Read `kind:'section'` vs `kind:'panel'` + `distribution_panel` to choose the tab set.
 4. Drop the Bus Coupler role group; render `role` from the leaf when a label is needed.

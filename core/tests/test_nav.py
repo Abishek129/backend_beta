@@ -95,17 +95,30 @@ class NavTreeTests(TestCase):
         self.tree = self.data['tree']
 
     # --- the fixed category spine --------------------------------------------
-    def test_the_eight_categories_are_always_emitted_in_order(self):
+    def test_visible_categories_keep_canonical_order(self):
         self.assertEqual([n['slug'] for n in self.tree],
-                         [slug for _cid, _label, slug in NAV_CATEGORIES])
+                         [slug for cid, _label, slug in NAV_CATEGORIES if cid != 'apfc'])
         self.assertEqual([n['label'] for n in self.tree],
-                         [label for _cid, label, _slug in NAV_CATEGORIES])
+                         [label for cid, label, _slug in NAV_CATEGORIES if cid != 'apfc'])
         self.assertTrue(all(n['kind'] == 'section' for n in self.tree))
 
     def test_an_empty_category_is_still_emitted(self):
-        for slug in ('ht-panels', 'amf-panels', 'apfc-panels', 'ups-panels'):
+        for slug in ('ht-panels', 'amf-panels', 'ups-panels'):
             with self.subTest(slug=slug):
                 self.assertEqual(_by_slug(self.tree, slug)['children'], [])
+
+    def test_empty_apfc_and_hvac_are_hidden(self):
+        MFM.objects.filter(pk=self.mfm[9].pk).update(active=False)
+        data = build_tree()
+        self.assertFalse({'apfc-panels', 'hvac-panels'} &
+                         {node['slug'] for node in data['tree']})
+        self.assertEqual(data['count'], len(data['tree']))
+
+    def test_populated_apfc_is_not_hidden(self):
+        Group.objects.create(name='APFC Test', slug='apfc-test',
+                             is_panel=True, nav_category='apfc')
+        apfc = _by_slug(build_tree()['tree'], 'apfc-panels')
+        self.assertEqual(len(apfc['children']), 1)
 
     def test_category_node_shape(self):
         pcc = _by_slug(self.tree, 'pcc-panels')
@@ -267,7 +280,7 @@ class NavTreeTests(TestCase):
         self.assertNotIn('old-shed', [n['slug'] for n in _walk(self.tree)])
 
     def test_envelope_counts(self):
-        self.assertEqual(self.data['count'], 8)                 # the fixed spine
+        self.assertEqual(self.data['count'], 7)                 # empty APFC hidden
         # 3 (MCC-1) + 2 (MCC-2) + 2 (Lighting DB) + 1 loose (MFM-09)
         self.assertEqual(self.data['leaf_count'], 8)
         # bound AND in the tree: MFM-01, MFM-03, MFM-09 (MFM-10 is bound but ungrouped)
@@ -353,7 +366,7 @@ class CategoryEdgeCaseTests(TestCase):
         tree = build_tree()['tree']
         self.assertEqual([n['slug'] for n in _by_slug(tree, 'pcc-panels')['children']],
                          ['pcc'])
-        self.assertEqual(_by_slug(tree, 'hvac-panels')['children'], [])
+        self.assertNotIn('hvac-panels', [node['slug'] for node in tree])
 
     def test_the_default_panel_kind_falls_through_to_nav_category(self):
         panel = Group.objects.create(logger_id='grp_p', name='Board', slug='board',
@@ -383,7 +396,7 @@ class CategoryEdgeCaseTests(TestCase):
                                  is_panel=True)
         Group.objects.filter(pk=a.pk).update(parent=b)
         data = build_tree()
-        self.assertEqual(data['count'], 8)
+        self.assertEqual(data['count'], len(data['tree']))
         self.assertEqual(data['uncategorised_panel_count'], 1)
 
     def test_an_mfm_override_beats_its_groups_category(self):
@@ -395,7 +408,7 @@ class CategoryEdgeCaseTests(TestCase):
         tree = build_tree()['tree']
         self.assertEqual([n['label'] for n in
                           _by_slug(tree, 'production-panels')['children']], ['A'])
-        self.assertEqual(_by_slug(tree, 'hvac-panels')['children'], [])
+        self.assertNotIn('hvac-panels', [node['slug'] for node in tree])
 
     def test_an_uncategorised_loose_meter_is_counted_and_not_rendered(self):
         group = Group.objects.create(logger_id='grp_g', name='Yard', slug='yard')

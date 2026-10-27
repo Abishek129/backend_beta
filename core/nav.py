@@ -1,6 +1,6 @@
 """EMS nav tree — a FIXED two-level sidebar.
 
-    category (core.nav_categories.NAV_CATEGORIES, stable order, always emitted)
+    category (stable order; empty APFC/HVAC sections are omitted)
       ├── panel      (Group.is_panel) -> Overview + Incoming/Outgoing/Spare
       └── loose leaf (an active MFM that no panel claims)
 
@@ -324,7 +324,8 @@ def build_tree():
         buckets[mfm.nav_category].append(_loose_leaf(mfm, mfm.nav_category, stats))
 
     tree = [_category_node(cid, label, slug, i, buckets[cid])
-            for i, (cid, label, slug) in enumerate(NAV_CATEGORIES)]
+            for i, (cid, label, slug) in enumerate(NAV_CATEGORIES)
+            if cid not in ('apfc', 'hvac') or buckets[cid]]
     ungrouped = ungrouped_mfms().count()
     return {
         'count': len(tree),
