@@ -15,11 +15,10 @@ from .models import (AssetType, Breaker, DataSource, DistributionPanel, EmsNav,
                      Equipment, EquipmentConfig, FeedEdge, Group, Membership, MFM,
                      LoggerSchema, LoggerSchemaField, MfmConfig, MfmThreshold,
                      DistributionPanelThreshold,
-                     Nameplate, PanelConfig, PanelType, RtmThreshold,
+                     Nameplate, NavCategory, PanelConfig, PanelType, RtmThreshold,
                      ViewerAsset, ViewerRule, ViewerSetting)
-from .nav import build_tree, resolved_category
-from .nav_categories import (CATEGORY_PANEL_KIND, MFM_NAV_CATEGORY_CHOICES, NAV_CATEGORIES,
-                             NAV_CATEGORY_CHOICES, NAV_CATEGORY_LABEL, panel_axes)
+from .nav import (build_tree, category_label, panel_axes, panel_category_index,
+                  resolved_category)
 from .slugs import free_slug, slug_owner
 from .audited_upload import run_audited_upload
 from .sheet_import import SheetError
@@ -27,21 +26,39 @@ from .sheet_import import SheetError
 _RTM_FIELDS = ('metric', 'low_max', 'normal_max', 'moderate_max', 'high_max')
 
 
+def _category_choices():
+    """Every category (hidden ones marked) — the select for a nav_category
+    field and the panel form's Category dropdown."""
+    return [('', '---------'),
+            *((c.code, c.label if c.active else f'{c.label} (hidden)')
+              for c in NavCategory.objects.all())]
+
+
+class _NavCategorySelectMixin:
+    """``nav_category`` is a plain code column; edit it as a dropdown."""
+
+    def formfield_for_dbfield(self, db_field, request, **kwargs):
+        if db_field.name == 'nav_category':
+            return forms.ChoiceField(choices=_category_choices, required=False,
+                                     label=kwargs.get('label') or 'Nav category',
+                                     help_text=db_field.help_text)
+        return super().formfield_for_dbfield(db_field, request, **kwargs)
+
+
 class NavCategoryFilter(admin.SimpleListFilter):
     """The nav categories plus an explicit '— uncategorised —' facet.
 
-    A plain ``list_filter = ('nav_category',)`` uses ChoicesFieldListFilter,
-    which offers only the DECLARED choices — so there would be no facet for
-    '', i.e. no way to list the rows nobody has filed yet. That is the single
-    most important query the operator runs after an import.
+    A plain ``list_filter = ('nav_category',)`` would offer only the values
+    present — no facet for '', i.e. no way to list the rows nobody has filed
+    yet. That is the single most important query the operator runs after an
+    import.
     """
     title = 'nav category'
     parameter_name = 'nav_category'
-    # NOT `choices`: that name is ListFilter's own choices(changelist) method.
-    categories = NAV_CATEGORY_CHOICES
 
     def lookups(self, request, model_admin):
-        return [('none', '— uncategorised —'), *self.categories]
+        return [('none', '— uncategorised —'),
+                *((c.code, c.label) for c in NavCategory.objects.all())]
 
     def queryset(self, request, queryset):
         value = self.value()
@@ -50,8 +67,7 @@ class NavCategoryFilter(admin.SimpleListFilter):
         return queryset.filter(nav_category=value) if value else queryset
 
 
-class MfmNavCategoryFilter(NavCategoryFilter):
-    categories = MFM_NAV_CATEGORY_CHOICES       # a meter may be filed under all eight
+MfmNavCategoryFilter = NavCategoryFilter
 
 
 @admin.action(description='Pin nav category (importer stops reseeding it)')
@@ -197,11 +213,8 @@ class GroupRtmInline(admin.TabularInline):      # per-panel band thresholds
     extra = 0
 
 
-_CATEGORY_CHOICES = [('', '---------'), *((cid, label) for cid, label, _slug in NAV_CATEGORIES)]
-
-
 class DistributionPanelForm(_SlugFormMixin, forms.ModelForm):
-    category = forms.ChoiceField(choices=_CATEGORY_CHOICES,
+    category = forms.ChoiceField(choices=_category_choices,
                                  help_text='Where this panel shows in the EMS sidebar.')
 
     class Meta:
@@ -231,24 +244,22 @@ class PanelCategoryFilter(admin.SimpleListFilter):
     parameter_name = 'category'
 
     def lookups(self, request, model_admin):
-        return [('none', '— not set on the panel —'),
-                *((cid, label) for cid, label, _slug in NAV_CATEGORIES)]
+        return [('none', '— not placed —'),
+                *((c.code, c.label) for c in NavCategory.objects.filter(active=True))]
 
     def queryset(self, request, queryset):
         value = self.value()
-        structural = Q(config__panel_kind__in=list(CATEGORY_PANEL_KIND.values()))
-        if value == 'none':
-            return queryset.exclude(structural).filter(nav_category='')
-        if value in CATEGORY_PANEL_KIND:
-            return queryset.filter(config__panel_kind=CATEGORY_PANEL_KIND[value])
-        if value:
-            return queryset.exclude(structural).filter(nav_category=value)
-        return queryset
+        if not value:
+            return queryset
+        # The nav's own resolution (hand-set category, panel kind, ancestors).
+        wanted = None if value == 'none' else value
+        return queryset.filter(pk__in=[pk for pk, cid in panel_category_index().items()
+                                       if cid == wanted])
 
 
 @admin.register(DistributionPanel)
 class DistributionPanelAdmin(admin.ModelAdmin):
-    """A distribution panel under one of the eight categories, with its
+    """A distribution panel under one of the EMS nav categories, with its
     Incomers / Outgoers / Spares — each one an MFM."""
     form = DistributionPanelForm
     fieldsets = (
@@ -282,7 +293,8 @@ class DistributionPanelAdmin(admin.ModelAdmin):
 
     @admin.display(description='category')
     def category_label(self, obj):
-        return NAV_CATEGORY_LABEL.get(resolved_category(obj), '— none —')
+        cid = resolved_category(obj)
+        return category_label(cid) if cid else '— none —'
 
     @admin.display(description='incomers', ordering='n_incoming')
     def incomers(self, obj):
@@ -332,7 +344,7 @@ class DistributionPanelAdmin(admin.ModelAdmin):
 
 
 @admin.register(Group)
-class GroupAdmin(admin.ModelAdmin):
+class GroupAdmin(_NavCategorySelectMixin, admin.ModelAdmin):
     # panel_kind is shown read-only beside nav_category so the operator can see
     # BOTH placement axes at once (it lives on the PanelConfig inline, and the
     # two must never be conflated — see core/nav_categories.py).
@@ -482,7 +494,7 @@ class MfmThresholdInline(admin.StackedInline):
 
 
 @admin.register(MFM)
-class MFMAdmin(admin.ModelAdmin):
+class MFMAdmin(_NavCategorySelectMixin, admin.ModelAdmin):
     form = MFMForm
     change_list_template = 'admin/core/mfm/change_list.html'
     fieldsets = (
@@ -561,7 +573,7 @@ class MFMAdmin(admin.ModelAdmin):
         if rows:
             return f'group {rows[0].group.name}'
         if obj.nav_category and obj.nav_category_source == 'manual':
-            return NAV_CATEGORY_LABEL.get(obj.nav_category, obj.nav_category)
+            return category_label(obj.nav_category)
         return '—'
 
     def save_model(self, request, obj, form, change):
@@ -891,9 +903,42 @@ class BreakerAdmin(admin.ModelAdmin):
 _ROLE_TITLES = {'incoming': 'Incomers', 'outgoing': 'Outgoers', 'spare': 'Spares'}
 
 
+class NavCategoryForm(forms.ModelForm):
+    class Meta:
+        model = NavCategory
+        fields = '__all__'
+
+    def clean_slug(self):
+        slug = self.cleaned_data['slug']
+        owner = slug_owner(slug, self.instance)
+        if owner:
+            raise ValidationError(f'Already used by {owner}.')
+        return slug
+
+
+@admin.register(NavCategory)
+class NavCategoryAdmin(admin.ModelAdmin):
+    """The sidebar's categories. Never deleted — untick Active to hide one, so
+    the panels and meters filed under it keep their code."""
+    form = NavCategoryForm
+    list_display = ('label', 'code', 'slug', 'sort_order', 'panel_kind', 'hide_when_empty',
+                    'active')
+    list_editable = ('sort_order', 'panel_kind', 'hide_when_empty', 'active')
+    list_filter = ('active', 'panel_kind')
+    search_fields = ('label', 'code', 'slug')
+    ordering = ('sort_order', 'id')
+
+    def get_readonly_fields(self, request, obj=None):
+        # The code is what panels and meters store; renaming it would orphan them.
+        return ('code',) if obj is not None else ()
+
+    def has_delete_permission(self, request, obj=None):
+        return False
+
+
 @admin.register(EmsNav)
 class EmsNavAdmin(admin.ModelAdmin):
-    """The eight categories exactly as the sidebar renders them (it IS
+    """The categories exactly as the sidebar renders them (it IS
     ``build_tree()``), with an add-panel / add-MFM link on each. Read-only:
     every edit happens on the Distribution Panel / MFM pages it links to."""
 

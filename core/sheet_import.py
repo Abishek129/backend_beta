@@ -22,9 +22,8 @@ from django.db import transaction
 from core import logger_devices
 from core.logger_client import LoggerApiError
 from core.models import (Group, LoggerSchema, Membership, MFM, MfmConfig,
-                         NameplateBase, PanelConfig)
-from core.nav import resolved_category
-from core.nav_categories import NAV_CATEGORIES, NAV_CATEGORY_LABEL, panel_axes
+                         NameplateBase, NavCategory, PanelConfig)
+from core.nav import category_label, panel_axes, resolved_category
 from core.slugs import free_slug, slug_owner
 
 MAX_ROWS = 5000
@@ -48,7 +47,7 @@ METER_COLUMNS = (
            note='The meter. The same MFM name + Table name on two rows is the same meter '
                 '(e.g. one panel\'s outgoer that is another panel\'s incomer).'),
     Column('category', 'Nav category', 'category', required=True,
-           note='HT, AMF, PCC, UPS, APFC, Production, Utility or HVAC. With a Distribution '
+           note='One of the EMS nav categories (Lists sheet). With a Distribution '
                 'panel it is where the PANEL shows; without one, where this MFM shows.'),
     Column('panel', 'Distribution panel',
            note='Blank = this MFM shows directly under the Nav category. A name = the panel '
@@ -104,17 +103,26 @@ def _name_key(value):
     return ' '.join(str(value or '').split()).casefold()
 
 
-_CATEGORY = {}
-for _cid, _label, _slug in NAV_CATEGORIES:
-    for _alias in (_cid, f'{_cid} panel', f'{_cid} panels', _label, _slug):
-        _CATEGORY[_norm(_alias)] = _cid
+def _short(label):
+    """'HT Panels' -> 'HT': the spelling the template's dropdown offers."""
+    return re.sub(r'\s+panels?$', '', label, flags=re.IGNORECASE) or label
+
+
+def _categories():
+    """``(alias table, readable list)`` for the ACTIVE nav categories."""
+    table, names = {}, []
+    for c in NavCategory.objects.filter(active=True):
+        names.append(_short(c.label))
+        for alias in (c.code, f'{c.code} panel', f'{c.code} panels', c.label, c.slug,
+                      _short(c.label)):
+            table.setdefault(_norm(alias), c.code)
+    return table, ', '.join(names)
+
 
 _ROLE = {**dict.fromkeys(('incomer', 'incomers', 'incoming', 'incomings', 'ic', 'i c'), 'incoming'),
          **dict.fromkeys(('outgoer', 'outgoers', 'outgoing', 'outgoings', 'og', 'o g'), 'outgoing'),
          **dict.fromkeys(('spare', 'spares'), 'spare')}
 _ROLE_LABEL = {'incoming': 'Incomings', 'outgoing': 'Outgoings', 'spare': 'Spare'}
-
-_CATEGORY_NAMES = ', '.join(label.replace(' Panels', '') for _c, label, _s in NAV_CATEGORIES)
 
 
 def _text(raw):
@@ -125,7 +133,7 @@ def _text(raw):
     return str(raw).strip()
 
 
-def _convert(col, raw):
+def _convert(col, raw, categories):
     """One cell -> its value, or ValueError with a message for the operator."""
     if col.kind == 'text':
         return _text(raw)
@@ -140,7 +148,7 @@ def _convert(col, raw):
                 raise ValueError(f'"{_text(raw)}" is not a whole number')
             return int(value)
         return value
-    table, allowed = {'category': (_CATEGORY, _CATEGORY_NAMES),
+    table, allowed = {'category': categories,
                       'role': (_ROLE, 'Incomings, Outgoings, Spare'),
                       }[col.kind]
     value = table.get(_norm(raw))
@@ -268,7 +276,7 @@ class PanelRow:
     nameplate: dict
 
 
-def _parse(sheet, header, rows, columns, report):
+def _parse(sheet, header, rows, columns, report, categories):
     known = {}
     for col in columns:
         known[_norm(col.label)] = col
@@ -301,7 +309,7 @@ def _parse(sheet, header, rows, columns, report):
             if _text(raw) == '':
                 continue
             try:
-                value = _convert(col, raw)
+                value = _convert(col, raw, categories)
             except ValueError as exc:
                 report.error(sheet, number, f'{col.label}: {exc}.')
                 failed.add(col.key)
@@ -314,26 +322,26 @@ def _parse(sheet, header, rows, columns, report):
     return parsed
 
 
-def _meter_rows(sheets, report):
+def _meter_rows(sheets, report, categories):
     header, rows = sheets[METERS]
     return [MeterRow(row=n, name=v.get('name', ''), category=v.get('category', ''),
                      panel=v.get('panel', ''), role=v.get('role'),
                      table=v.get('table_name', ''),
                      schema_code=v.get('logger_schema', ''), nameplate=np)
-            for n, v, np in _parse(METERS, header, rows, METER_COLUMNS, report)]
+            for n, v, np in _parse(METERS, header, rows, METER_COLUMNS, report, categories)]
 
 
-def _panel_rows(sheets, report):
+def _panel_rows(sheets, report, categories):
     if PANELS not in sheets:
         return []
     header, rows = sheets[PANELS]
     return [PanelRow(row=n, name=v.get('name', ''), category=v.get('category'),
                      sort_order=v.get('sort_order'), nameplate=np)
-            for n, v, np in _parse(PANELS, header, rows, PANEL_COLUMNS, report)]
+            for n, v, np in _parse(PANELS, header, rows, PANEL_COLUMNS, report, categories)]
 
 
 def _label(cid):
-    return NAV_CATEGORY_LABEL.get(cid, cid)
+    return category_label(cid)
 
 
 def _validate(meters, panels, report):
@@ -560,6 +568,26 @@ def _apply_panels(plan_panels, report):
         report.change('panel', action, g.name, info.sheet, info.row, '; '.join(changes))
 
 
+def bind_device(m, dev, changes):
+    """Point meter ``m`` (unsaved changes) at LoggerFast device ``dev``: its
+    table, data source and device details, pinned 'manual' so the hierarchy
+    importer never rebinds it."""
+    fields = {'logger_id': dev['id'], 'table_name': dev['table_name'],
+              'logger_table_id': dev['table_id'], 'table_binding': 'manual',
+              'protocol': dev['protocol'], 'gateway_id': dev['gateway_id'],
+              'unit_id': dev['unit_id'], 'port': dev['port'],
+              'logger_status': dev['status']}
+    before = len(changes)
+    _set(m, fields, changes)
+    ds = logger_devices.data_source_for(dev['db_target_id'])
+    if m.data_source_id != ds.pk:
+        m.data_source = ds
+        changes.append(f'data_source: → {ds.name}')
+    # device details are bookkeeping; only the binding is worth reporting
+    changes[before:] = [c for c in changes[before:]
+                        if c.split(':')[0] in ('logger_id', 'table_name', 'data_source')]
+
+
 def _apply_meters(plan_meters, report):
     for info in plan_meters.values():
         changes, m = [], info.mfm
@@ -575,22 +603,8 @@ def _apply_meters(plan_meters, report):
             _set(m, {'name': info.name, 'sheet_row': info.row}, changes)
         if action == 'create':
             m.sheet_row = info.row
-        dev = info.device
-        if dev is not None:
-            fields = {'logger_id': dev['id'], 'table_name': dev['table_name'],
-                      'logger_table_id': dev['table_id'], 'table_binding': 'manual',
-                      'protocol': dev['protocol'], 'gateway_id': dev['gateway_id'],
-                      'unit_id': dev['unit_id'], 'port': dev['port'],
-                      'logger_status': dev['status']}
-            before = len(changes)
-            _set(m, fields, changes)
-            ds = logger_devices.data_source_for(dev['db_target_id'])
-            if m.data_source_id != ds.pk:
-                m.data_source = ds
-                changes.append(f'data_source: → {ds.name}')
-            # device details are bookkeeping; only the binding is worth reporting
-            changes[before:] = [c for c in changes[before:]
-                                if c.split(':')[0] in ('logger_id', 'table_name', 'data_source')]
+        if info.device is not None:
+            bind_device(m, info.device, changes)
         if info.logger_schema is not None and m.logger_schema_id != info.logger_schema.pk:
             m.logger_schema = info.logger_schema
             changes.append(f'logger_schema: → {info.logger_schema.code}_v1')
@@ -638,8 +652,9 @@ def run_import(sheets, *, commit=False):
     """Parse, validate and apply an upload. Writes only when ``commit`` and the
     whole upload is clean; otherwise every write is rolled back."""
     report = Report()
-    meters = _meter_rows(sheets, report)
-    panels = _panel_rows(sheets, report)
+    categories = _categories()
+    meters = _meter_rows(sheets, report, categories)
+    panels = _panel_rows(sheets, report, categories)
     # Both checking stages always run, so one upload reports EVERY error
     # (sheet rules and LoggerFast/DB lookups) instead of one stage at a time.
     _validate(meters, panels, report)
@@ -663,7 +678,7 @@ def run_import(sheets, *, commit=False):
 # --------------------------------------------------------------------------
 _INSTRUCTIONS = [
     ('EMS import template', 'title'),
-    ('One upload builds the EMS tree. The eight categories are fixed; this file fills them.', ''),
+    ('One upload builds the EMS tree. It fills the EMS nav categories listed on the Lists sheet.', ''),
     ('', ''),
     ('Meters sheet (required) — one row per meter per place it appears', 'h'),
     ('• No Distribution panel → the MFM shows directly under its Nav category. Leave Role blank.', ''),
@@ -781,16 +796,18 @@ def build_template():
             example.cell(row=r, column=c, value=value).fill = example_fill
 
     lists = wb.create_sheet('Lists')
+    names = [_short(c.label) for c in NavCategory.objects.filter(active=True)]
     for c, (title, values) in enumerate((
-            ('Nav category', [label.replace(' Panels', '') for _c, label, _s in NAV_CATEGORIES]),
+            ('Nav category', names),
             ('Role', ['Incomings', 'Outgoings', 'Spare'])), start=1):
         lists.cell(row=1, column=c, value=title).font = Font(bold=True)
         for r, value in enumerate(values, start=2):
             lists.cell(row=r, column=c, value=value)
         lists.column_dimensions[get_column_letter(c)].width = 16
-    dropdown(meters, 'Lists!$A$2:$A$9', 'B')
+    last = max(len(names), 1) + 1
+    dropdown(meters, f'Lists!$A$2:$A${last}', 'B')
     dropdown(meters, 'Lists!$B$2:$B$4', 'D')
-    dropdown(panels, 'Lists!$A$2:$A$9', 'B')
+    dropdown(panels, f'Lists!$A$2:$A${last}', 'B')
 
     wb.active = 1                       # opens on the Meters sheet
     buf = io.BytesIO()

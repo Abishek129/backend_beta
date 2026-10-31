@@ -21,14 +21,26 @@ IDs. Distribution panels aggregate their independently bound member MFMs by memb
 
 ## Nav categories
 
-The sidebar is a **fixed two-level tree**: eight categories (HT, AMF, PCC, UPS, APFC, Production,
-Utility, HVAC), each always emitted, holding panels and loose meters. Two orthogonal fields
-place a row — `PanelConfig.panel_kind` for HT/AMF/PCC/UPS, `Group|MFM.nav_category` for the
-other four. Both are seeded from the row's name by the importer and correctable in the admin;
-a hand-edited value is pinned and never reseeded. `manage.py import_logger_hierarchy --dry`
-prints a per-category census plus the uncategorised and low-confidence rows — **read it before
-trusting the heuristic**, since it is guessing at a naming convention we do not control. See
-`NAV_CONTRACT.md` §1.1.
+The sidebar is a **two-level tree**: categories holding panels and loose meters. The categories
+are `NavCategory` rows — user-editable (label, slug, order, default panel kind, hide-when-empty,
+active) in admin → **EMS Nav Categories** and through `POST /api/ems/push/`. Migration 0010
+seeded the original eight (HT, AMF, PCC, UPS, APFC, Production, Utility, HVAC; APFC/HVAC hidden
+while empty). A hand-set `Group|MFM.nav_category` places a row; otherwise the importer's guesses
+place it — a panel's `PanelConfig.panel_kind` through the category defaulting to that kind, then
+a guessed `nav_category`. A hand-edited value is pinned and never reseeded.
+`manage.py import_logger_hierarchy --dry` prints a per-category census plus the uncategorised
+and low-confidence rows — **read it before trusting the heuristic**, since it is guessing at a
+naming convention we do not control. See `EMS_NAV_PUSH.md` §1.
+
+The whole sidebar can be pushed as JSON — a **full sync** (`core/nav_push.py`; payload and rules
+in `EMS_NAV_PUSH.md`):
+
+```bash
+curl -u <admin>:<password> -H 'Content-Type: application/json' -d @nav.json \
+     http://<host>:<port>/api/ems/push/                 # preview: report + resulting nav
+curl -u <admin>:<password> -H 'Content-Type: application/json' -d @nav.json \
+     "http://<host>:<port>/api/ems/push/?commit=true"   # write, all or nothing
+```
 
 Or in bulk from a spreadsheet (`core/sheet_import.py` — its column lists are the format):
 
@@ -104,7 +116,7 @@ shown in topology but excluded from source/consumer reconciliation.
 Shared shell endpoints are `GET /api/ems/`, `/api/bms/`, `/api/assets/`, and
 `/api/kit-preview/catalog/`; the latter lists active `ViewerAsset` records.
 
-Panels and meters can also be built by hand: admin → **EMS Nav** shows the eight categories with
+Panels and meters can also be built by hand: admin → **EMS Nav** shows the categories with
 *+ Distribution panel* (Incomers / Outgoers / Spares) and *+ MFM* (LoggerFast device picker) on
 each. Hand-built rows have no `logger_id` and the importer never touches them (§1.2).
 | `panels` | EMS sockets: `dispatch.py` (id → type), `registry.py` (`screen(...)` declares a screen), `routing.py` (routes generated from the registry), single-MFM consumers, and membership-based distribution-panel aggregate consumers. |

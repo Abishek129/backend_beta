@@ -17,7 +17,7 @@ from core import logger_devices
 from core.equipment import (ensure_mfm_equipment, ensure_panel_equipment,
                             ensure_primary_reference)
 from core.models import Group, LoggerSchema, Membership, MFM, MfmConfig, PanelConfig
-from core.nav_categories import panel_axes
+from core.nav import panel_axes
 from core.services import reset_energy_directions
 from core.slugs import free_slug
 

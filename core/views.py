@@ -1,6 +1,7 @@
 """REST views: the nav tree, per-id nameplate config, service status, and the
-spreadsheet upload that builds the tree."""
+spreadsheet upload and JSON push that build the tree."""
 import base64
+import json
 
 import requests
 from django.conf import settings
@@ -14,6 +15,7 @@ from core.config import resolve_for_id
 from core.constants import FEEDER_ID_OFFSET
 from core.models import Equipment, Group, MFM, ViewerAsset
 from core.nav import build_tree, ungrouped_mfms
+from core.nav_push import run_push
 from core.sheet_import import SheetError, build_template, read_upload, run_import
 from core.viewer import resolve_viewer
 
@@ -108,6 +110,18 @@ def _staff_from_basic_auth(request):
     return user if user is not None and user.is_active and user.is_staff else None
 
 
+def _unauthorised():
+    response = JsonResponse({'detail': 'Admin credentials required (HTTP Basic auth).'},
+                            status=401)
+    response['WWW-Authenticate'] = 'Basic realm="EMS import"'
+    return response
+
+
+def _commit_requested(request):
+    return (request.GET.get('commit') or request.POST.get('commit') or '').lower() \
+        in ('1', 'true', 'yes')
+
+
 @csrf_exempt
 @require_POST
 def ems_import(request):
@@ -117,22 +131,37 @@ def ems_import(request):
     writes nothing. ``commit=true`` writes, all or nothing.
     """
     if _staff_from_basic_auth(request) is None:
-        response = JsonResponse({'detail': 'Admin credentials required (HTTP Basic auth).'},
-                                status=401)
-        response['WWW-Authenticate'] = 'Basic realm="EMS import"'
-        return response
+        return _unauthorised()
     upload = request.FILES.get('file')
     if upload is None:
         return JsonResponse({'detail': 'Attach the sheet as form field "file".'}, status=400)
     if upload.size > _MAX_UPLOAD_BYTES:
         return JsonResponse({'detail': 'File is larger than 10 MB.'}, status=413)
-    commit = (request.GET.get('commit') or request.POST.get('commit') or '').lower() \
-        in ('1', 'true', 'yes')
+    commit = _commit_requested(request)
     try:
         sheets = read_upload(upload.name, upload.read())
     except SheetError as exc:
         return JsonResponse({'detail': str(exc)}, status=400)
     report = run_import(sheets, commit=commit)
+    return JsonResponse(report.as_dict(), status=200 if report.ok else 400)
+
+
+@csrf_exempt
+@require_POST
+def ems_push(request):
+    """Replace the whole EMS sidebar from a JSON body (see ``core.nav_push``).
+
+    A preview by default — reports every change and error and returns the nav
+    the push would produce, writing nothing. ``commit=true`` writes, all or
+    nothing.
+    """
+    if _staff_from_basic_auth(request) is None:
+        return _unauthorised()
+    try:
+        body = json.loads(request.body or b'null')
+    except ValueError:
+        return JsonResponse({'detail': 'The body must be JSON.'}, status=400)
+    report = run_push(body, commit=_commit_requested(request))
     return JsonResponse(report.as_dict(), status=200 if report.ok else 400)
 
 

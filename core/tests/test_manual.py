@@ -164,7 +164,8 @@ class DistributionPanelAdminTests(AdminCase):
             'PCC-1', 'pcc', {'incoming': [self.m[1]]}))
         self.assertEqual(r.status_code, 302, r.content[:2000])
         panel = Group.objects.get(name='PCC-1')
-        self.assertEqual(panel.nav_category, '')
+        # The category is always stored, so two categories sharing a kind stay apart.
+        self.assertEqual((panel.nav_category, panel.nav_category_source), ('pcc', 'manual'))
         self.assertEqual(panel.config.panel_kind, 'pcc_panel')
         self.assertEqual(_cat(build_tree()['tree'], 'pcc')['children'][0]['slug'], 'pcc-1')
 

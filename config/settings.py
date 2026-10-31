@@ -100,14 +100,16 @@ CORS_ALLOW_CREDENTIALS = True
 # Database
 # https://docs.djangoproject.com/en/5.2/ref/settings/#databases
 
+# Env overrides (DB_NAME, DB_USER, DB_PASSWORD, DB_HOST, DB_PORT); unset or
+# blank keeps the plant server's values, so a .env without them changes nothing.
 DATABASES = {
     'default': {
         'ENGINE': 'django.db.backends.postgresql',
-        'NAME': 'cmd_equipment_beta',
-        'USER': 'postgres',
-        'PASSWORD': '',
-        'HOST': 'localhost',
-        'PORT': '5432',
+        'NAME': os.environ.get('DB_NAME') or 'cmd_equipment_beta',
+        'USER': os.environ.get('DB_USER') or 'postgres',
+        'PASSWORD': os.environ.get('DB_PASSWORD') or '',
+        'HOST': os.environ.get('DB_HOST') or 'localhost',
+        'PORT': os.environ.get('DB_PORT') or '5432',
     }
 }
 
@@ -185,6 +187,7 @@ JAZZMIN_SETTINGS = {
         'auth.User': 'fas fa-user',
         'auth.Group': 'fas fa-users',
         'core.EmsNav': 'fas fa-sitemap',
+        'core.NavCategory': 'fas fa-list-ol',
         'core.DistributionPanel': 'fas fa-bolt',
         'core.Group': 'fas fa-layer-group',
         'core.MFM': 'fas fa-gauge-high',
@@ -195,8 +198,8 @@ JAZZMIN_SETTINGS = {
         'core.MfmConfig': 'fas fa-sliders',
         'core.RtmThreshold': 'fas fa-traffic-light',
     },
-    'order_with_respect_to': ['core', 'core.emsnav', 'core.distributionpanel', 'core.mfm',
-                              'panels', 'auth'],
+    'order_with_respect_to': ['core', 'core.emsnav', 'core.navcategory',
+                              'core.distributionpanel', 'core.mfm', 'panels', 'auth'],
     'default_icon_parents': 'fas fa-chevron-circle-right',
     'default_icon_children': 'fas fa-circle',
     'show_ui_builder': False,

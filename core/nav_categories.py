@@ -1,24 +1,20 @@
-"""The nav sidebar axis — the eight fixed categories, and the name heuristic
-that seeds them on import.
+"""The importer's category vocabulary — the eight default categories, and the
+name heuristic that seeds them on import.
 
-TWO sources place a panel, and they are ORTHOGONAL:
+The sidebar's categories themselves are DB rows (``core.models.NavCategory``),
+user-editable in the admin and through ``POST /api/ems/push/``; migration 0010
+seeded them from ``NAV_CATEGORIES``. This module stays Django-free so the
+importer can classify in its pure ``build()`` stage.
+
+The heuristic guesses on TWO orthogonal axes:
 
     PanelConfig.panel_kind  -> HT / AMF / PCC / UPS   (structural switchgear)
     Group.nav_category      -> HVAC / APFC / Production / Utility  (blank-able)
 
-A meter has no panel_kind, so ``MFM.nav_category`` may name any of the eight.
-
-A blank ``nav_category`` means "this row is placed by ``panel_kind``". Never
-derive one axis from the other, and never widen one to cover the other:
 ``panel_kind`` says what a row IS (it drives the frame ``mfm_type`` and the
-nameplate defaults), ``nav_category`` says WHERE IT IS FILED in the sidebar.
-
-Replaces backend2's hardcoded ``core/ems_tree.py`` SECTIONS: the category LIST
-is fixed here, but which rows land in it is DB state — seeded by the importer,
-corrected in the admin — so a re-import never re-hardcodes the plant.
-
-One definition, four consumers: ``core.models`` (choices), ``core.importer``
-(seeding), ``core.admin`` (filter + bulk correction), ``core.nav`` (order).
+nameplate defaults), ``nav_category`` says WHERE IT IS FILED. A guessed
+``panel_kind`` places a panel through the category whose default kind matches
+(see ``core.nav``); a hand-set ``nav_category`` always wins over both.
 """
 import re
 
@@ -70,27 +66,6 @@ NAV_CATEGORY_SOURCE_CHOICES = [
     ('auto',   'Auto — the importer heuristic may reseed it'),
     ('manual', 'Manual — set by hand, importer never touches it'),
 ]
-
-# A meter has no PanelConfig, so no panel_kind: its nav_category is its ONLY
-# axis and may name any of the eight (e.g. a standalone meter under HT Panels).
-MFM_NAV_CATEGORY_CHOICES = [(cid, label) for cid, label, _slug in NAV_CATEGORIES]
-
-# The admin's single "Category" dropdown on a panel, written back onto the two
-# axes — the exact inverse of what core.nav resolves, so no information is lost.
-CATEGORY_PANEL_KIND = {cid: kind for kind, cid in PANEL_KIND_CATEGORY.items()}
-
-
-def panel_axes(cid):
-    """Category id -> ``(panel_kind, nav_category)`` for a panel filed there.
-
-    HT/AMF/PCC/UPS are structural: they set ``panel_kind`` and leave
-    ``nav_category`` blank. The other four keep the 'distribution_panel' kind
-    and set ``nav_category``.
-    """
-    kind = CATEGORY_PANEL_KIND.get(cid)
-    if kind:
-        return kind, UNCATEGORISED
-    return 'distribution_panel', cid
 
 # ---------------------------------------------------------------------------
 # The classifier.

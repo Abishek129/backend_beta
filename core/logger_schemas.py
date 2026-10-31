@@ -146,6 +146,67 @@ def schema_assignment_rows(
     return tuple(assignments)
 
 
+def install_schema(spec, *, version=1, timestamp_column, name='', description=''):
+    """Install one blueprint version, or verify the stored one matches it.
+
+    Returns ``(schema, created, fields_created)``. A stored version is
+    immutable: any difference raises ValueError — a changed layout needs a new
+    version. A blank ``spec.logger_id`` leaves the LoggerFast id unchecked.
+    """
+    label = f'{spec.code}_v{version}'
+    schema, created = LoggerSchema.objects.get_or_create(
+        code=spec.code, version=version,
+        defaults={
+            'name': name or spec.code,
+            'logger_id': spec.logger_id or None,
+            'timestamp_column': timestamp_column,
+            'description': description,
+        },
+    )
+    if not created:
+        if spec.logger_id and schema.logger_id != spec.logger_id:
+            raise ValueError(
+                f'{label} already exists with LoggerFast id '
+                f'{schema.logger_id!r}, not {spec.logger_id!r}')
+        if schema.timestamp_column != timestamp_column:
+            raise ValueError(
+                f'{label} already uses timestamp column '
+                f'{schema.timestamp_column!r}, not {timestamp_column!r}')
+    existing = {field.name: field for field in schema.fields.all()}
+    incoming_names = {field.name for field in spec.fields}
+    extra = sorted(set(existing) - incoming_names)
+    if extra:
+        raise ValueError(
+            f'{label} is immutable and has fields absent from the source: '
+            f'{", ".join(extra)}')
+    created_fields = 0
+    for field in spec.fields:
+        values = {
+            'kind': field.kind,
+            'data_type': field.data_type,
+            'unit': field.unit,
+            'address': field.address,
+            'scale': field.scale,
+            'formula': field.formula,
+            'evaluation_order': field.evaluation_order,
+            'position': field.position,
+            'description': field.description,
+        }
+        current = existing.get(field.name)
+        if current is None:
+            LoggerSchemaField.objects.create(
+                logger_schema=schema, name=field.name, **values)
+            created_fields += 1
+            continue
+        differences = [key for key, value in values.items()
+                       if getattr(current, key) != value]
+        if differences:
+            raise ValueError(
+                f'{label}/{field.name} is immutable and differs in '
+                f'{", ".join(differences)}; create a new schema version')
+    return schema, created, created_fields
+
+
 @transaction.atomic
 def install_schema_catalog(specs, assignments, *, source='mfm_schema_details.md'):
     """Idempotently install verified blueprints and assign existing MFMs."""
@@ -153,58 +214,12 @@ def install_schema_catalog(specs, assignments, *, source='mfm_schema_details.md'
     created_schemas = created_fields = assigned = unchanged = 0
     for spec in specs:
         # Verified on the physical gic_* tables linked by the audited workbook.
-        timestamp_column = 'timestamp_utc'
-        schema, created = LoggerSchema.objects.get_or_create(
-            code=spec.code, version=1,
-            defaults={
-                'name': spec.code,
-                'logger_id': spec.logger_id,
-                'timestamp_column': timestamp_column,
-                'description': f'Imported from {source}.',
-            },
-        )
-        if created:
-            created_schemas += 1
-        elif schema.logger_id != spec.logger_id:
-            raise ValueError(
-                f'{spec.code}_v1 already exists with LoggerFast id '
-                f'{schema.logger_id!r}, not {spec.logger_id!r}')
-        elif schema.timestamp_column != timestamp_column:
-            raise ValueError(
-                f'{spec.code}_v1 already uses timestamp column '
-                f'{schema.timestamp_column!r}, not {timestamp_column!r}')
+        schema, created, fields = install_schema(
+            spec, timestamp_column='timestamp_utc',
+            description=f'Imported from {source}.')
+        created_schemas += created
+        created_fields += fields
         schema_by_code[spec.code] = schema
-        existing = {field.name: field for field in schema.fields.all()}
-        incoming_names = {field.name for field in spec.fields}
-        extra = sorted(set(existing) - incoming_names)
-        if extra:
-            raise ValueError(
-                f'{spec.code}_v1 is immutable and has fields absent from the source: '
-                f'{", ".join(extra)}')
-        for field in spec.fields:
-            values = {
-                'kind': field.kind,
-                'data_type': field.data_type,
-                'unit': field.unit,
-                'address': field.address,
-                'scale': field.scale,
-                'formula': field.formula,
-                'evaluation_order': field.evaluation_order,
-                'position': field.position,
-                'description': field.description,
-            }
-            current = existing.get(field.name)
-            if current is None:
-                LoggerSchemaField.objects.create(
-                    logger_schema=schema, name=field.name, **values)
-                created_fields += 1
-                continue
-            differences = [key for key, value in values.items()
-                           if getattr(current, key) != value]
-            if differences:
-                raise ValueError(
-                    f'{spec.code}_v1/{field.name} is immutable and differs in '
-                    f'{", ".join(differences)}; create a new schema version')
 
     known_codes = set(schema_by_code)
     used_codes = {code for _row, _table, code in assignments}

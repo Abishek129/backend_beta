@@ -16,8 +16,17 @@ from django.core.validators import RegexValidator
 from django.db import models
 
 from core.constants import FEEDER_ID_OFFSET
-from core.nav_categories import (MFM_NAV_CATEGORY_CHOICES, NAV_CATEGORY_CHOICES,
-                                 NAV_CATEGORY_SOURCE_CHOICES)
+from core.nav_categories import NAV_CATEGORY_SOURCE_CHOICES
+
+# What a distribution panel IS — drives the frame mfm_type and the nameplate
+# defaults. Shared by PanelConfig and NavCategory (a category's default kind).
+PANEL_KIND_CHOICES = [
+    ('distribution_panel', 'Distribution Panel'),
+    ('pcc_panel', 'PCC Panel'),
+    ('ht_panel', 'HT Panel'),
+    ('amf_panel', 'AMF Panel'),
+    ('ups_panel', 'UPS Panel'),
+]
 
 
 class DataSource(models.Model):
@@ -196,6 +205,41 @@ class Equipment(models.Model):
         return self.name
 
 
+class NavCategory(models.Model):
+    """One EMS sidebar category — user-editable in the admin and through
+    ``POST /api/ems/push/``.
+
+    ``code`` is what ``Group.nav_category`` / ``MFM.nav_category`` store and
+    what the FE receives as ``category``; ``slug`` is the route segment. Rows
+    are never deleted: a push that leaves a category out sets ``active=False``,
+    so everything filed under it keeps its code and the category can return.
+    """
+    code = models.SlugField(
+        max_length=32, unique=True,
+        help_text='Stable id stored on panels and meters; the FE "category" value.')
+    label = models.CharField(max_length=100)
+    slug = models.SlugField(max_length=100, unique=True,
+                            help_text='Route segment: /electrical/<slug>.')
+    sort_order = models.IntegerField(default=0)
+    panel_kind = models.CharField(
+        max_length=24, choices=PANEL_KIND_CHOICES, default='distribution_panel',
+        help_text='Kind a panel filed here gets by default. A non-default kind also '
+                  'places panels nobody has filed by hand (the importer seeds kinds).')
+    hide_when_empty = models.BooleanField(
+        default=False, help_text='Leave the category out of /api/ems/ while it is empty.')
+    active = models.BooleanField(default=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        db_table = 'nav_category'
+        verbose_name = 'EMS Nav Category'
+        verbose_name_plural = 'EMS Nav Categories'
+        ordering = ['sort_order', 'id']
+
+    def __str__(self):
+        return self.label
+
+
 class Group(models.Model):
     """One LoggerFast group — a nav section, or (``is_panel``) a distribution panel.
 
@@ -218,11 +262,11 @@ class Group(models.Model):
         default=False,
         help_text='True = distribution panel (aggregate screens + role groups).')
     nav_category = models.CharField(
-        max_length=16, choices=NAV_CATEGORY_CHOICES, blank=True, default='',
-        db_index=True,
-        help_text='HVAC / APFC / Production / Utility only. Blank = placed by '
-                  'PanelConfig.panel_kind (HT/AMF/PCC/UPS). On a plain group it '
-                  'is also the fallback for the loose meters beneath it.')
+        max_length=32, blank=True, default='', db_index=True,
+        help_text='NavCategory code. Set by hand it always places the panel; an '
+                  'importer guess yields to PanelConfig.panel_kind. Blank = placed by '
+                  'panel_kind, else the nearest ancestor. On a plain group it is also '
+                  'the fallback for the loose meters beneath it.')
     nav_category_source = models.CharField(
         max_length=8, choices=NAV_CATEGORY_SOURCE_CHOICES, default='auto',
         help_text='manual = set by hand, the importer never reseeds it.')
@@ -258,7 +302,7 @@ class DistributionPanel(Group):
 
 
 class EmsNav(Group):
-    """Admin-only page: the eight categories exactly as the sidebar renders
+    """Admin-only page: the categories exactly as the sidebar renders
     them, with an add-panel / add-MFM link on each. Owns no data."""
 
     class Meta:
@@ -308,9 +352,8 @@ class MFM(models.Model):
         help_text='Primary/legacy physical panel. Memberships remain authoritative '
                   'when a meter appears in more than one panel.')
     nav_category = models.CharField(
-        max_length=16, choices=MFM_NAV_CATEGORY_CHOICES, blank=True, default='',
-        db_index=True,
-        help_text='Only for a meter that is NOT in a distribution panel: it then '
+        max_length=32, blank=True, default='', db_index=True,
+        help_text='NavCategory code. Only for a meter that is NOT in a distribution panel: it then '
                   'shows directly under this category. Ignored for a panel '
                   'incomer/outgoer/spare (the panel places it).')
     nav_category_source = models.CharField(
@@ -538,17 +581,10 @@ class NameplateBase(models.Model):
 
 class PanelConfig(NameplateBase):
     """Nameplate for a distribution panel (an ``is_panel`` Group)."""
-    # Doubles as the nav axis for the four STRUCTURAL categories (see
-    # core.nav_categories.PANEL_KIND_CATEGORY): ht/amf/pcc/ups_panel each place
-    # the panel in its sidebar category. 'distribution_panel' places nothing —
-    # such a row falls through to Group.nav_category.
-    PANEL_KIND_CHOICES = [
-        ('distribution_panel', 'Distribution Panel'),
-        ('pcc_panel', 'PCC Panel'),
-        ('ht_panel', 'HT Panel'),
-        ('amf_panel', 'AMF Panel'),
-        ('ups_panel', 'UPS Panel'),
-    ]
+    # Also the fallback nav axis: a panel nobody filed by hand lands in the
+    # first active NavCategory whose panel_kind matches (see core.nav).
+    # 'distribution_panel' places nothing.
+    PANEL_KIND_CHOICES = PANEL_KIND_CHOICES
     group = models.OneToOneField(Group, on_delete=models.CASCADE, related_name='config')
     panel_kind = models.CharField(max_length=24, choices=PANEL_KIND_CHOICES,
                                   default='distribution_panel',

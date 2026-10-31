@@ -26,7 +26,7 @@ from django.db import transaction
 from django.utils import timezone
 
 from core.models import (DataSource, FeedEdge, Group, Membership, MFM,
-                         MfmConfig, PanelConfig)
+                         MfmConfig, NavCategory, PanelConfig)
 from core.nav_categories import (LOW_CONFIDENCE, NAV_CATEGORIES,
                                  NAV_CATEGORY_LABEL, NAV_CATEGORY_SLUGS,
                                  PANEL_KIND_CATEGORY, classify)
@@ -108,9 +108,11 @@ class DesiredState:
 
 def manual_slugs():
     """Active slugs of rows built in the admin — pass to ``fetch`` so the
-    importer's tree-wide slug allocation steps around them."""
+    importer's tree-wide slug allocation steps around them. User-defined
+    category slugs are reserved the same way."""
     return {*Group.objects.filter(active=True, logger_id=None).values_list('slug', flat=True),
-            *MFM.objects.filter(active=True, logger_id=None).values_list('slug', flat=True)}
+            *MFM.objects.filter(active=True, logger_id=None).values_list('slug', flat=True),
+            *NavCategory.objects.values_list('slug', flat=True)}
 
 
 def fetch(client, dsn_by_target, *, include_twins=True, include_edges=True,

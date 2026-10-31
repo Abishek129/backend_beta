@@ -6,7 +6,7 @@ share one, and neither may take a category's.
 """
 import re
 
-from core.models import Group, MFM
+from core.models import Group, MFM, NavCategory
 from core.nav_categories import NAV_CATEGORY_SLUGS
 
 
@@ -19,8 +19,14 @@ def slug_owner(slug, instance=None):
     """Who else already holds ``slug`` — a category, or an active group/meter —
     as a human-readable phrase; None when it is free. ``instance`` (the row
     being saved) never counts against itself."""
-    if slug in NAV_CATEGORY_SLUGS:
+    categories = NavCategory.objects.filter(slug=slug)
+    if isinstance(instance, NavCategory) and instance.pk:
+        categories = categories.exclude(pk=instance.pk)
+    elif slug in NAV_CATEGORY_SLUGS:
         return 'an EMS category'
+    other = categories.first()
+    if other is not None:
+        return f'EMS category “{other.label}”'
     for model, kind in ((Group, 'panel/group'), (MFM, 'MFM')):
         qs = model.objects.filter(active=True, slug=slug)
         if isinstance(instance, model) and instance.pk:

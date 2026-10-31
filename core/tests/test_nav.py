@@ -20,7 +20,8 @@ from django.db import connection
 from django.utils import timezone
 
 from core.constants import FEEDER_ID_OFFSET
-from core.models import DataSource, Group, Membership, MFM, MfmConfig, PanelConfig
+from core.models import (DataSource, Group, Membership, MFM, MfmConfig, NavCategory,
+                         PanelConfig)
 from core.nav import build_tree
 from core.nav_categories import NAV_CATEGORIES
 
@@ -342,7 +343,7 @@ class NavTreeTests(TestCase):
     def test_ems_query_budget(self):
         with CaptureQueriesContext(connection) as ctx:
             self.client.get('/api/ems/')
-        self.assertLessEqual(len(ctx.captured_queries), 6)
+        self.assertLessEqual(len(ctx.captured_queries), 7)
 
     # --- helpers -------------------------------------------------------------
     def _panel(self, slug):
@@ -418,3 +419,54 @@ class CategoryEdgeCaseTests(TestCase):
         self.assertEqual(data['uncategorised_mfm_count'], 1)
         self.assertEqual(data['leaf_count'], 0)
         self.assertNotIn('a', [n['slug'] for n in _walk(data['tree'])])
+
+
+class UserCategoryTests(TestCase):
+    """The categories are NavCategory rows, not a fixed list."""
+
+    def test_a_hand_set_category_beats_the_panel_kind_but_a_guess_does_not(self):
+        hand = Group.objects.create(name='Hand', slug='hand', is_panel=True,
+                                    nav_category='utility', nav_category_source='manual')
+        guess = Group.objects.create(logger_id='grp_g', name='Guess', slug='guess',
+                                     is_panel=True, nav_category='utility')
+        for g in (hand, guess):
+            PanelConfig.objects.create(group=g, panel_kind='pcc_panel')
+        tree = build_tree()['tree']
+        self.assertEqual([n['slug'] for n in _by_slug(tree, 'utility-panels')['children']],
+                         ['hand'])
+        self.assertEqual([n['slug'] for n in _by_slug(tree, 'pcc-panels')['children']],
+                         ['guess'])
+
+    def test_a_new_category_renders_in_its_sort_position(self):
+        NavCategory.objects.create(code='solar', label='Solar', slug='solar', sort_order=1)
+        Group.objects.create(name='Array 1', slug='array-1', is_panel=True,
+                             nav_category='solar', nav_category_source='manual')
+        tree = build_tree()['tree']
+        self.assertEqual([n['category'] for n in tree][:3], ['ht', 'amf', 'solar'])
+        self.assertEqual(_by_slug(tree, 'solar')['pathOverride'], '/electrical/solar')
+
+    def test_a_hidden_category_is_omitted_and_its_rows_counted(self):
+        NavCategory.objects.filter(code='utility').update(active=False)
+        Group.objects.create(name='Board', slug='board', is_panel=True,
+                             nav_category='utility', nav_category_source='manual')
+        data = build_tree()
+        self.assertNotIn('utility', [n['category'] for n in data['tree']])
+        self.assertEqual(data['uncategorised_panel_count'], 1)
+
+    def test_a_kind_places_through_the_first_category_defaulting_to_it(self):
+        NavCategory.objects.filter(code='pcc').update(active=False)
+        NavCategory.objects.create(code='mcc', label='MCC', slug='mcc', sort_order=2,
+                                   panel_kind='pcc_panel')
+        panel = Group.objects.create(logger_id='grp_p', name='PCC-9', slug='pcc-9',
+                                     is_panel=True)
+        PanelConfig.objects.create(group=panel, panel_kind='pcc_panel')
+        self.assertEqual([n['slug'] for n in _by_slug(build_tree()['tree'], 'mcc')['children']],
+                         ['pcc-9'])
+
+    def test_a_hand_filed_meter_whose_groups_all_retired_shows_standalone(self):
+        old = Group.objects.create(name='Old', slug='old', is_panel=True, active=False)
+        mfm = MFM.objects.create(name='M', slug='m', nav_category='hvac',
+                                 nav_category_source='manual')
+        Membership.objects.create(group=old, mfm=mfm, role='incoming')
+        tree = build_tree()['tree']
+        self.assertEqual([n['label'] for n in _by_slug(tree, 'hvac-panels')['children']], ['M'])

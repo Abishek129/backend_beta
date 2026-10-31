@@ -1,39 +1,74 @@
-"""EMS nav tree — a FIXED two-level sidebar.
+"""EMS nav tree — a two-level sidebar over the user-editable categories.
 
-    category (stable order; empty APFC/HVAC sections are omitted)
+    category (NavCategory rows: active, in sort order; hide_when_empty ones
+      │       are omitted while they hold nothing)
       ├── panel      (Group.is_panel) -> Overview + Incoming/Outgoing/Spare
       └── loose leaf (an active MFM that no panel claims)
 
 Intermediate non-panel Groups no longer render. They keep two jobs: they own
 memberships (their meters become loose leaves) and they carry ``nav_category``
-for their whole subtree. A meter in no group at all becomes a loose leaf only
+for their whole subtree. A meter in no active group becomes a loose leaf only
 when a human filed it under a category (see ``_STANDALONE``).
 
 There is NO per-category mode — backend2's ``mode: hierarchical|flat`` is gone.
 Whether a node expands is derived per node from ``Group.is_panel``, so a
 distribution panel gets its role groups wherever it is filed.
 
-Two orthogonal axes place a panel (see core.nav_categories):
-``PanelConfig.panel_kind`` -> HT/AMF/PCC/UPS, ``nav_category`` -> the rest.
-Node shapes reuse the keys CMD_V2 already reads; see ``NAV_CONTRACT.md``.
+A panel's own category, strongest first: a hand-set ``nav_category``
+(admin, workbook, push), then ``PanelConfig.panel_kind`` through the first
+active category with that default kind, then an importer-guessed
+``nav_category``; else the nearest ancestor's. Codes naming no active
+category count as unset. Node shapes: see ``NAV_CONTRACT.md``.
 """
 from django.db.models import Q
 
 from core.config import resolve_panel_config
 from core.config_defaults import defaults_for
 from core.constants import FEEDER_ID_OFFSET
-from core.models import Group, Membership, MFM
-from core.nav_categories import NAV_CATEGORIES, PANEL_KIND_CATEGORY
+from core.models import Group, Membership, MFM, NavCategory
 
 # FE module basePath the category slugs hang under (pathOverride).
 _MODULE = '/electrical'
 # Role groups, in display order; empty ones are omitted.
 _ROLES = [('incoming', 'Incoming'), ('outgoing', 'Outgoing'), ('spare', 'Spare')]
-# A meter in NO group, filed straight under a category by hand. 'manual' is the
-# point: the admin pins every category it writes, while an imported ungrouped
-# device carries only the importer's name GUESS ('auto') and stays out.
+# A meter in NO active group, filed straight under a category by hand.
+# 'manual' is the point: the admin pins every category it writes, while an
+# imported ungrouped device carries only the importer's name GUESS ('auto') and
+# stays out. A membership of a retired group does not count as a group.
 _HAND_FILED = Q(nav_category_source='manual') & ~Q(nav_category='')
-_STANDALONE = Q(active=True, memberships__isnull=True) & _HAND_FILED
+_IN_ACTIVE_GROUP = Q(memberships__group__active=True)
+
+
+class Categories:
+    """The active categories, loaded once per tree/request."""
+
+    def __init__(self, rows=None):
+        self.rows = list(NavCategory.objects.filter(active=True)) if rows is None else rows
+        self.codes = {c.code for c in self.rows}
+        self.label = {c.code: c.label for c in self.rows}
+        # panel_kind -> the FIRST active category defaulting to it
+        self.by_kind = {}
+        for c in self.rows:
+            if c.panel_kind != 'distribution_panel':
+                self.by_kind.setdefault(c.panel_kind, c.code)
+
+    def known(self, code):
+        return code if code in self.codes else None
+
+
+def panel_axes(code):
+    """Category code -> ``(panel_kind, nav_category)`` for a panel filed there
+    by hand: the category's default kind, and the code itself — always set, so
+    two categories sharing a kind stay distinct."""
+    row = NavCategory.objects.filter(code=code).first()
+    return (row.panel_kind if row else 'distribution_panel'), code
+
+
+def category_label(code, categories=None):
+    if categories is None:
+        row = NavCategory.objects.filter(code=code).first()
+        return row.label if row else code
+    return categories.label.get(code, code)
 
 
 def _kv(volts):
@@ -55,35 +90,44 @@ def _mfm_nominal_kv(mfm):
     return _kv(volts)
 
 
-def _group_category(group):
-    """A group's OWN category: panel_kind first, then nav_category.
+def _group_category(group, categories):
+    """A group's OWN category, or None (see the module docstring for order).
 
     ``panel_kind`` only means anything on a panel — a plain group has no
-    PanelConfig — and its 'distribution_panel' default maps to nothing, so such
-    a row falls through to ``nav_category`` and then to its ancestors.
+    PanelConfig — and its 'distribution_panel' default maps to nothing.
     """
+    own = categories.known(group.nav_category)
+    if own and group.nav_category_source == 'manual':
+        return own
     if group.is_panel:
         cfg = getattr(group, 'config', None)
-        cid = PANEL_KIND_CATEGORY.get(getattr(cfg, 'panel_kind', '') or '')
+        cid = categories.by_kind.get(getattr(cfg, 'panel_kind', '') or '')
         if cid:
             return cid
-    return group.nav_category or None
+    return own
 
 
-def resolved_category(group):
+def resolved_category(group, categories=None):
     """One group's category — own value, else the nearest ancestor's — for the
     admin forms. ``build_tree`` uses the batched ``_category_index`` instead."""
+    categories = categories or Categories()
     seen = set()
     while group is not None and group.pk not in seen:
         seen.add(group.pk)
-        cid = _group_category(group)
+        cid = _group_category(group, categories)
         if cid:
             return cid
         group = group.parent
     return None
 
 
-def _category_index(groups):
+def panel_category_index():
+    """``{Group.id: category code or None}`` for every group, batched."""
+    groups = list(Group.objects.select_related('config'))
+    return _category_index(groups, Categories())
+
+
+def _category_index(groups, categories):
     """``{Group.id: category id or None}`` — own category, else the nearest
     ancestor that has one.
 
@@ -93,7 +137,7 @@ def _category_index(groups):
     re-bucket its whole subtree. ``_retire_vanished`` preserves ``parent_id``,
     so the chain is intact. Memoised: O(n), no queries, cycle-safe.
     """
-    own = {g.id: _group_category(g) for g in groups}
+    own = {g.id: _group_category(g, categories) for g in groups}
     parent = {g.id: g.parent_id for g in groups}
     memo = {}
 
@@ -234,21 +278,26 @@ def _panel_node(group, memberships, category, by_id, stats):
     return node
 
 
+def standalone_mfms():
+    """Active meters in no active group, filed under a category by hand."""
+    return MFM.objects.filter(_HAND_FILED, active=True).exclude(_IN_ACTIVE_GROUP)
+
+
 def ungrouped_mfms():
-    """Active meters the nav cannot place: in no group and not filed by hand."""
-    return (MFM.objects.filter(active=True, memberships__isnull=True)
+    """Active meters the nav cannot place: in no active group and not filed by hand."""
+    return (MFM.objects.filter(active=True).exclude(_IN_ACTIVE_GROUP)
             .exclude(_HAND_FILED))
 
 
-def _category_node(cid, label, slug, index, children):
+def _category_node(category, children):
     return {
-        'id': f'eq-{cid}',
-        'label': label,
-        'slug': slug,
+        'id': f'eq-{category.code}',
+        'label': category.label,
+        'slug': category.slug,
         'kind': 'section',
-        'category': cid,
-        'sort_order': index,
-        'pathOverride': f'{_MODULE}/{slug}',
+        'category': category.code,
+        'sort_order': category.sort_order,
+        'pathOverride': f'{_MODULE}/{category.slug}',
         'model_slug': None,
         'children': children,
     }
@@ -257,18 +306,20 @@ def _category_node(cid, label, slug, index, children):
 def build_tree():
     """``{count, leaf_count, matched_mfm_count, ungrouped_mfm_count,
     uncategorised_panel_count, uncategorised_mfm_count, tree}``."""
-    # PIN 2026-09-09: query budget = 5 flat queries regardless of plant size
-    # (groups+config, twins prefetch, memberships+mfm+config, standalone
-    # meters, ungrouped count); the tree is bucketed in Python, never per node.
+    # PIN 2026-09-09: query budget = 6 flat queries regardless of plant size
+    # (categories, groups+config, twins prefetch, memberships+mfm+config,
+    # standalone meters, ungrouped count); the tree is bucketed in Python,
+    # never per node.
     #
     # NOTE the deliberate absence of .filter(active=True): _category_index needs
     # retired ancestors. Only ACTIVE groups are ever emitted.
+    categories = Categories()
     groups = list(Group.objects
                   .select_related('config', 'equipment__config')
                   .prefetch_related('twins')
                   .order_by('sort_order', 'name', 'id'))
     by_id = {g.id: g for g in groups}
-    cat_by_group = _category_index(groups)
+    cat_by_group = _category_index(groups, categories)
 
     members_by_group, claimed = {}, set()
     for m in (Membership.objects
@@ -281,7 +332,7 @@ def build_tree():
             claimed.add(m.mfm_id)      # a panel member NEVER also floats loose
 
     stats = {'leaves': 0, 'matched': set(), 'uncat_panels': 0, 'uncat_mfms': 0}
-    buckets = {cid: [] for cid, _label, _slug in NAV_CATEGORIES}
+    buckets = {c.code: [] for c in categories.rows}
 
     # --- panels, in canonical group order ----------------------------------
     for g in groups:
@@ -307,25 +358,25 @@ def build_tree():
         if mfm_id in claimed:
             continue
         mfm = first_row[mfm_id].mfm
-        cid = (mfm.nav_category
+        cid = (categories.known(mfm.nav_category)
                or next((c for c in (cat_by_group.get(x) for x in gids) if c), None))
-        if cid is None or cid == '':
+        if cid is None:
             stats['uncat_mfms'] += 1
             continue
         buckets[cid].append(_loose_leaf(mfm, cid, stats))
 
-    # --- standalone meters: in no group, filed under a category by hand -----
-    # No membership means no panel claims them and no plain group emitted them.
-    for mfm in (MFM.objects.filter(_STANDALONE)
-                .select_related('config', 'breaker').order_by('name', 'id')):
-        if mfm.nav_category not in buckets:          # a stale code; never guess
+    # --- standalone meters: in no active group, filed by hand ---------------
+    # No active membership means no panel claims them and no plain group
+    # emitted them.
+    for mfm in (standalone_mfms().select_related('config', 'breaker')
+                .order_by('name', 'id')):
+        if mfm.nav_category not in buckets:   # a hidden or stale code; never guess
             stats['uncat_mfms'] += 1
             continue
         buckets[mfm.nav_category].append(_loose_leaf(mfm, mfm.nav_category, stats))
 
-    tree = [_category_node(cid, label, slug, i, buckets[cid])
-            for i, (cid, label, slug) in enumerate(NAV_CATEGORIES)
-            if cid not in ('apfc', 'hvac') or buckets[cid]]
+    tree = [_category_node(c, buckets[c.code]) for c in categories.rows
+            if buckets[c.code] or not c.hide_when_empty]
     ungrouped = ungrouped_mfms().count()
     return {
         'count': len(tree),
